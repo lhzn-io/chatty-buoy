@@ -1,0 +1,10 @@
+# chatty-buoy conda environment
+name: chatty-buoy
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -e ../kanoa-mlops
