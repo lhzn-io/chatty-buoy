@@ -1,0 +1,46 @@
+[application]
+enable-perf-measurement=1
+perf-measurement-interval-sec=5
+
+[tiled-display]
+enable=1
+rows=1
+columns=1
+width=1280
+height=720
+
+[source0]
+enable=1
+# Type 3 = URI (HTTP stream)
+type=3
+# Using HTTP video stream
+uri=http://192.168.3.243:8080/video
+num-sources=1
+gpu-id=0
+drop-frame-interval=0
+
+[sink0]
+enable=1
+# Type 2 = EglSink (Standard window display)
+type=2
+sync=0 # Set to 0 for maximum speed (no syncing to clock)
+gpu-id=0
+
+[osd]
+enable=1
+gpu-id=0
+border-width=2
+text-size=12
+
+[streammux]
+gpu-id=0
+live-source=1
+batch-size=1
+width=640
+height=640
+
+[primary-gie]
+enable=1
+gpu-id=0
+# This links to the infer config above
+config-file=config_infer_primary_yolo11.txt

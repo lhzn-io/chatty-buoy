@@ -1,0 +1,24 @@
+services:
+  yolo-streamer:
+    build: .
+    image: thor-deepstream-yolo
+    container_name: chatty-buoy
+    runtime: nvidia  # Passes through the Blackwell GPU
+    privileged: true
+    ports:
+      - "5000:5000"  # Web interface for visualizations
+    environment:
+      - DISPLAY=${DISPLAY}
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - NVIDIA_VISIBLE_DEVICES=all #expose all gpus
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ../../:/app
+      - ../../models:/app/models
+      - ../../chatty_buoy:/app/chatty_buoy
+    working_dir: /app/containers/vision
+    stdin_open: true
+    tty: true
+    # entrypoint: ["/bin/bash", "/app/containers/vision/scripts/run_export_and_stream.sh"]
+    entrypoint: ["/bin/bash"]
+    command: ["-c", "python3 /app/chatty_buoy/vision/stream_yolo_optimized.py"]

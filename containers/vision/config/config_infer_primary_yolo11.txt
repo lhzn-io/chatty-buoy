@@ -1,0 +1,19 @@
+[property]
+gpu-id=0
+net-scale-factor=0.0039215697906911373
+# Path to your ONNX file (it will generate the .engine on first run)
+onnx-file=../yolo11n.onnx
+model-engine-file=../yolo11n.engine
+labelfile-path=labels.txt
+batch-size=1
+network-mode=2 # 0: FP32, 1: INT8, 2: FP16 (Best for Thor)
+num-detected-classes=80
+interval=0
+gie-unique-id=1
+process-mode=1
+network-type=0
+cluster-mode=2 # 2: NMS (Standard for YOLO)
+maintain-aspect-ratio=1
+symmetric-padding=1
+custom-lib-path=/opt/nvidia/deepstream/deepstream-8.0/sources/DeepStream-Yolo/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
+parse-bbox-func-name=NvDsInferParseYolo

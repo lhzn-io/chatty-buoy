@@ -1,0 +1,30 @@
+name: Chatty Buoy Local Config
+version: 1.0.0
+schema: v1
+
+models:
+  - name: Olmo 3 7B Chat
+    provider: openai
+    apiBase: http://192.168.55.1:8000/v1
+    apiKey: sk-local
+    model: allenai/Olmo-3-7B-Instruct
+    roles:
+      - chat
+      - edit
+  # TODO: Re-enable with proper code completion model (e.g., deepseek-coder, starcoder)
+  # Olmo-3-7B-Instruct is instruction-tuned, not designed for autocomplete
+  # - name: Olmo 3 7B Autocomplete
+  #   provider: openai
+  #   apiBase: http://192.168.55.1:8000/v1
+  #   apiKey: sk-local
+  #   model: allenai/Olmo-3-7B-Instruct
+  #   roles:
+  #     - autocomplete
+  - name: Nomic Embeddings
+    provider: ollama
+    apiBase: http://192.168.55.1:11434
+    model: nomic-embed-text
+    roles:
+      - embed
+
+allowAnonymousTelemetry: false
