@@ -13,7 +13,7 @@ Think of that local guy who's been on the water for 40 years — he seen the ebb
 
 No cloud. No subscription. No connectivity. Just a really chatty AI running locally on your vessel.
 
-And hey, if things turn south, he's right there with you. You might be SOL, but you're not solo!
+If things turn south, he's right there with you. You might think you're SOL, but you're not Solo!
 
 ## Overview
 
