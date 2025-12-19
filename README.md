@@ -2,7 +2,7 @@
 
 **Your virtual crew member who never shuts up (in a good way).**
 
-Think of that local guy who's been on the water for 40 years — he seen the ebbs and flows, knows every boat, every captain, and won't shut up about it. Now imagine that guy, but he's an AI running on your boat, listening to all 55 marine VHF channels at once, watching your cameras, reading your instruments, and actually helpful instead of just entertaining.
+Think of that local guy who's been on the water for 40 years — he seen the ebbs and flows, knows every boat, every captain, and won't shut up about it. Now imagine he's an AI running on your boat, listening to all 55 marine VHF channels at once, watching your cameras, reading your instruments, and actually helpful *and* entertaining.
 
 **chatty-buoy is an edge AI for boats.** It's the crew member who:
 - Listens to *everything* on VHF + AIS (all channels, all vessels, all the time)
