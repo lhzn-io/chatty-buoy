@@ -1,10 +1,16 @@
-# chatty-buoy conda environment
+# chatty-buoy conda environment (Optimized for Thor/Blackwell)
 name: chatty-buoy
 channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.11
+  - python=3.12  # Change to 3.12 for Thor compatibility
   - pip
   - pip:
+      - --extra-index-url https://pypi.jetson-ai-lab.io/jp70
+      - torch
+      - torchvision
+      - ultralytics
+      - jetson-stats
+      - opencv-python
       - -e ../kanoa-mlops
