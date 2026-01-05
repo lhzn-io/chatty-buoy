@@ -105,14 +105,14 @@ Built on NVIDIA Jetson Thor (Blackwell sm_110) using custom vLLM image:
 - Docker & Docker Compose
 - NVIDIA GPU with CUDA support
 - NVIDIA Container Toolkit
-- Python 3.11+ with conda
+- Python 3.11+ with micromamba
 
 ### Installation
 
 ```bash
-# Create conda environment
-conda env create -f environment.yml
-conda activate chatty-buoy
+# Create micromamba environment
+micromamba env create -f environment.yml
+micromamba activate chatty-buoy
 
 # Initialize infrastructure from kanoa-mlops templates
 kanoa mlops init --dir .

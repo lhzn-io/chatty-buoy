@@ -1,4 +1,4 @@
-# chatty-buoy conda environment (Optimized for Thor/Blackwell)
+# chatty-buoy micromamba environment (Optimized for Thor/Blackwell)
 name: chatty-buoy
 channels:
   - conda-forge
