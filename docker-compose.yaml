@@ -1,0 +1,160 @@
+services:
+  # 1. ASR Service (Riva / Parakeet-TDT 1.1B)
+  asr-service:
+    image: nvcr.io/nvidia/riva/riva-speech:2.24.0-l4t-aarch64
+    container_name: asr-service
+    runtime: nvidia
+    entrypoint: ["/bin/bash", "-c", "start-riva || sleep infinity"]
+    # pid: host # Removed to ensure isolation
+    ipc: host
+    environment:
+      - RIVA_URI=0.0.0.0:50051
+      - NGC_API_KEY=${NGC_API_KEY}
+    # Note: Riva requires .rmir or specific structure. 
+    # If models are in HF cache, we map it, but Riva usually needs `riva-build` step.
+    # Mapping cache to allow access if pre-built models exist there.
+    volumes:
+      - ./riva_quickstart_arm64_v2.24.0/model_repository:/data
+    ports:
+      - "50051:50051"
+    networks:
+      - agent-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # 2. TTS Service (F5-TTS)
+  # 2. TTS Service (Kokoro-82M - Speed Demon)
+  tts-service:
+    build:
+      context: .
+      dockerfile: src/voice/Dockerfile.kokoro
+    image: lhzn/kokoro:thor
+    container_name: tts-service
+    runtime: nvidia
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - USE_GPU=true
+    ports:
+      - "50000:8880"
+    networks:
+      - agent-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+
+
+
+  # 3. Front-End (L1): Gemma-3-4B
+  front-end-service:
+    image: nvcr.io/nvidia/vllm:25.12.post1-py3
+    container_name: front-end-service
+    runtime: nvidia
+    restart: "no"
+    ipc: host
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - VLLM_USE_FLASHINFER_MOE_FP4=1
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - VLLM_ATTENTION_BACKEND=FLASHINFER
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    command: >
+      vllm serve google/gemma-3-4b-it 
+      --quantization fp8 
+      --dtype bfloat16 
+      --gpu-memory-utilization 0.15 
+      --max-model-len 8192
+      --port 8001
+    ports:
+      - "8001:8001"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # 4. Dispatcher (L2): FunctionGemma-270m
+  dispatcher-service:
+    image: nvcr.io/nvidia/vllm:25.12.post1-py3
+    container_name: dispatcher-service
+    runtime: nvidia
+    restart: "no"
+    ipc: host
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    command: >
+      vllm serve google/functiongemma-270m-it 
+      --dtype bfloat16 
+      --gpu-memory-utilization 0.1 
+      --max-model-len 4096
+      --port 8002
+    ports:
+      - "8002:8002"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # 5. Cortex Service (L3): Nemotron-3-Nano-30B (Deep Reasoning)
+  cortex-service:
+    image: nvcr.io/nvidia/vllm:25.12.post1-py3
+    container_name: cortex-service
+    runtime: nvidia
+    restart: "no"
+    ipc: host
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - VLLM_USE_FLASHINFER_MOE_FP4=1
+      - VLLM_FLASHINFER_MOE_BACKEND=throughput
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - VLLM_USE_FLASHINFER_MOE_FP4=1
+      - VLLM_FLASHINFER_MOE_BACKEND=throughput
+      - MAX_JOBS=12
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - ~/.cache/vllm:/root/.cache/vllm
+      - ./scripts/start_cortex.sh:/opt/start_cortex.sh
+      - ./models/cortex:/models/config # For storing the parser script
+    ports:
+      - "8000:8000"
+    shm_size: '16gb'
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    entrypoint: ["/bin/bash", "/opt/start_cortex.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  agent-net:
+    driver: bridge
+
+

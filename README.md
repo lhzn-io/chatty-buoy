@@ -15,159 +15,51 @@ No cloud. No subscription. No connectivity. Just a really chatty AI running loca
 
 If things turn south, he's right there with you. You might think you're SOL, but you're not Solo!
 
-## Overview
+## Architecture: The "Speed Demon" Hybrid Stack
 
-chatty-buoy combines edge compute (NVIDIA Jetson/Thor), software-defined radio (SDR), and computer vision to provide AI-powered maritime monitoring without cloud dependencies. Built for environments where privacy, latency, and offline operation matter.
+The system runs on a **Hybrid Architecture** optimized for Jetson Thor (ARM64), balancing containerized stability with native performance:
 
-**Target deployments:**
+*   **Audio (Hearing)**: `nvcr.io/nvidia/riva/riva-speech:2.24.0-l4t-aarch64` (Docker). High-performance streaming speech recognition.
+*   **Cortex (Reasoning)**: `nvidia/tritonserver` (Docker). Running **Nemotron-3-Nano** (NVFP4) for reasoning.
+*   **Speaking (TTS)**: **Native Local Execution** of **CosyVoice2-0.5B**. Runs directly on Metal/CUDA for <200ms synthesis, bypassing container overhead.
+*   **Memory (RAG)**: `pgvector` (Docker). Vector database for long-term knowledge retention.
 
-- Small craft with power constraints
-- Research vessels and autonomous buoys
-- Luxury yachts requiring offline AI autonomy
-- Distributed coastal sensor networks
+See [Quintessential Architecture](docs/quint_architecture.md) for deep dives.
 
-## Architecture
+## Setup & Usage
 
-Built on NVIDIA Jetson Thor (Blackwell sm_110) using custom vLLM image:
-`ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor`
+### 1. Requirements
+*   NVIDIA Jetson AGX Thor (JetPack 7.0+)
+*   Docker & NVIDIA Container Runtime
+*   `micromamba` (Environment: `chatty-buoy`)
+*   **Optional**: `ngc` CLI (Install manually if you need to download new Riva models).
+    > [Install NGC CLI](https://org.ngc.nvidia.com/setup/installers/cli)
 
-## Use Cases
+### 2. Start the Stack
 
-### 1. Yacht/Research-Ship Integrated Deployment
-**Target Users:** Private yachts, research vessels, oceanographic institutions
-
-**What It Does:**
-- Modular architecture with distributed sensor arrays
-- Onboard crew interaction interfaces
-- Dynamic power management with optional satellite uplink
-- Designed for variable crew sizes and extended operational ranges
-
-**Why:** Can be configured for both short-term research expeditions and long-term private monitoring with mobility and range.
-
----
-
-### 2. Mobile Working Vessel
-**Target Users:** Fishing charter operators, marine surveyors, research teams, long-range sailors
-
-**What It Does:**
-- Power-efficient operation using vessel's 36V DC system (trolling motor batteries)
-- AGX Orin inference with prioritized VHF monitoring
-- Real-time sensor fusion from AIS, sonar, and weather sensors
-- Optional "moored inference" — continuous operation while anchored
-- 10-15 hour runtime on battery power
-
-**Why:** Ideal for fishing, surveying, research missions, and extended passages with minimal power draw. Integrates with existing electrical system, no separate power install required.
-
----
-
-### 3. Lite Buoy + Shore Station (Distributed)
-**Target Users:** Government monitoring networks, academic research, commercial fisheries
-
-**What It Does:**
-- Two-part deployment: lightweight AI-enabled floating buoy + centralized shore station
-- Buoy performs real-time edge inference (video, VHF monitoring)
-- Shore station handles heavy lifting (LLM analysis, video archiving)
-- Communication via LoRa (10km range) or Iridium (global)
-
-**Why:** Reduces floating power requirements, enables smaller/more mobile buoys, scalable architecture (1 shore station, N buoys).
-
----
-
-### 4. Mega-Yacht (Thor Multi-Node Cluster)
-**Target Users:** Ultra-high-net-worth individuals, private security, research vessels in high-risk zones
-
-**What It Does:**
-- **Offline AI autonomy**: Run 402B parameter models (Llama 4 Maverick) locally, zero cloud dependency
-- **Sensor fusion**: NMEA 2000 + radar + AIS + video + VHF + hydrophone → unified threat awareness
-- **Privacy-first**: No external API calls (location/conversation privacy)
-- **Starlink-denied ops**: Full capability in contested waters (South China Sea, Russia EEZ, military exclusion zones)
-
-**Hardware:**
-- 2-4x NVIDIA Thor SoCs (245-491GB VRAM total)
-- <10ms inter-GPU latency (NVLink/Infiniband)
-- 6x 4K cameras (360° coverage)
-- Dual SDR (VHF + SSB 2-30 MHz)
-- Liquid cooling + gyro-stabilized mounting
-
-**Real-World Scenario:**
-> Yacht transiting contested waters. Starlink blocked. Multi-Thor cluster provides GPT5/Gemini-class reasoning for nav decisions, crew safety alerts (VHF monitoring), and vessel detection (radar + AIS + video fusion) — all offline.
-
-**Power:** 400-800W (manageable on yacht generators 25-50 kW)
-
-**Why:** Security, privacy, and offline autonomy in environments where cloud access is unavailable, untrusted, or denied.
-
----
-
-## Setup
-
-### Prerequisites
-
-- Docker & Docker Compose
-- NVIDIA GPU with CUDA support
-- NVIDIA Container Toolkit
-- Python 3.11+ with micromamba
-
-### Installation
-
+**Step A: Application Infrastructure (Docker)**
+Starts Riva (ASR), Triton (Cortex), and Postgres (Memory).
 ```bash
-# Create micromamba environment
-micromamba env create -f environment.yml
+docker compose up -d
+```
+
+**Step B: Voice Synthesis (Local)**
+Starts the optimal local TTS server.
+```bash
+# In a new terminal
 micromamba activate chatty-buoy
-
-# Initialize infrastructure from kanoa-mlops templates
-kanoa mlops init --dir .
+bash scripts/start_tts.sh
 ```
 
-⚠️ **Important**: The `docker/` directory is generated by `kanoa mlops init` and is not tracked in git. Run the init command to generate the latest infrastructure configs from kanoa-mlops templates.
-
-## Usage
-
-### Interactive Mode
-
+**Step C: The Agent**
+Interact with the system.
 ```bash
-# Start any vLLM or Ollama service interactively
-kanoa mlops serve
-
-# List available models
-kanoa mlops list
-
-# Check service status
-kanoa mlops status
+micromamba run -n chatty-buoy python3 src/agent_reflex.py
 ```
 
-### Direct Commands
+## Roadmap
 
-```bash
-# Start specific service
-kanoa mlops serve vllm molmo
-kanoa mlops serve vllm gemma3 --model google/gemma-3-12b-it
-
-# Stop services
-kanoa mlops stop vllm molmo
-```
-
-## Models
-
-Current models configured:
-
-- **gemma3**: Google Gemma 3 (12B, 27B variants)
-- **molmo**: AllenAI Molmo 7B (multimodal)
-- **olmo3**: AllenAI OLMo 3 (7B, 32B variants)
-
-Models are cached in `~/.cache/huggingface/hub/`.
-
-## Docker Services
-
-Services are defined in `docker/vllm/` and `docker/ollama/`:
-
-- `docker-compose.gemma3.yml` - Gemma 3 inference
-- `docker-compose.molmo.yml` - Molmo multimodal
-- `docker-compose.olmo3.yml` - OLMo 3 inference
-- `docker-compose.ollama.yml` - Ollama runtime
-
-## Deployment Configurations
-
-See [deployment-configurations.md](docs/deployment-configurations.md) for complete specifications, power budgets, and architectural details across all deployment modalities.
+We are currently in **Phase 1 (Foundation)**. See [Roadmap](docs/roadmap.md) for the journey ahead, including NMEA integration, Sonar analysis, and Vision capabilities.
 
 ## License
 

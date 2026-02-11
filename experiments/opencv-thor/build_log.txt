@@ -1,0 +1,174 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 781B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for nvcr.io/nvidia/pytorch:25.08-py3
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/6] FROM nvcr.io/nvidia/pytorch:25.08-py3
+#4 DONE 0.0s
+
+#5 [2/6] WORKDIR /app/moshi
+#5 CACHED
+
+#6 [internal] load build context
+#6 transferring context: 5.69kB done
+#6 DONE 0.0s
+
+#7 [3/6] RUN apt-get update && apt-get install -y     libopus-dev     pkg-config     && rm -rf /var/lib/apt/lists/*
+#7 0.499 Get:1 http://ports.ubuntu.com/ubuntu-ports noble InRelease [256 kB]
+#7 0.565 Get:2 http://ports.ubuntu.com/ubuntu-ports noble-updates InRelease [126 kB]
+#7 0.578 Get:3 http://ports.ubuntu.com/ubuntu-ports noble-backports InRelease [126 kB]
+#7 0.592 Get:4 http://ports.ubuntu.com/ubuntu-ports noble-security InRelease [126 kB]
+#7 0.728 Get:5 http://ports.ubuntu.com/ubuntu-ports noble/multiverse arm64 Packages [274 kB]
+#7 0.759 Get:6 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 Packages [1776 kB]
+#7 0.791 Get:7 http://ports.ubuntu.com/ubuntu-ports noble/restricted arm64 Packages [113 kB]
+#7 0.792 Get:8 http://ports.ubuntu.com/ubuntu-ports noble/universe arm64 Packages [19.0 MB]
+#7 1.014 Get:9 http://ports.ubuntu.com/ubuntu-ports noble-updates/main arm64 Packages [2242 kB]
+#7 1.054 Get:10 http://ports.ubuntu.com/ubuntu-ports noble-updates/restricted arm64 Packages [4224 kB]
+#7 1.091 Get:11 http://ports.ubuntu.com/ubuntu-ports noble-updates/universe arm64 Packages [1913 kB]
+#7 1.105 Get:12 http://ports.ubuntu.com/ubuntu-ports noble-updates/multiverse arm64 Packages [38.6 kB]
+#7 1.108 Get:13 http://ports.ubuntu.com/ubuntu-ports noble-backports/universe arm64 Packages [34.7 kB]
+#7 1.108 Get:14 http://ports.ubuntu.com/ubuntu-ports noble-backports/main arm64 Packages [49.4 kB]
+#7 1.146 Get:15 http://ports.ubuntu.com/ubuntu-ports noble-security/main arm64 Packages [1889 kB]
+#7 1.176 Get:16 http://ports.ubuntu.com/ubuntu-ports noble-security/universe arm64 Packages [1197 kB]
+#7 1.197 Get:17 http://ports.ubuntu.com/ubuntu-ports noble-security/multiverse arm64 Packages [39.0 kB]
+#7 1.198 Get:18 http://ports.ubuntu.com/ubuntu-ports noble-security/restricted arm64 Packages [4059 kB]
+#7 2.293 Fetched 37.5 MB in 2s (20.3 MB/s)
+#7 2.293 Reading package lists...
+#7 3.890 Reading package lists...
+#7 5.443 Building dependency tree...
+#7 6.169 Reading state information...
+#7 6.761 pkg-config is already the newest version (1.8.1-2build1).
+#7 6.761 The following NEW packages will be installed:
+#7 6.763   libopus-dev
+#7 6.839 0 upgraded, 1 newly installed, 0 to remove and 69 not upgraded.
+#7 6.839 Need to get 261 kB of archives.
+#7 6.839 After this operation, 892 kB of additional disk space will be used.
+#7 6.839 Get:1 http://ports.ubuntu.com/ubuntu-ports noble/main arm64 libopus-dev arm64 1.4-1build1 [261 kB]
+#7 7.239 debconf: unable to initialize frontend: Dialog
+#7 7.239 debconf: (TERM is not set, so the dialog frontend is not usable.)
+#7 7.239 debconf: falling back to frontend: Readline
+#7 7.291 debconf: unable to initialize frontend: Readline
+#7 7.291 debconf: (This frontend requires a controlling tty.)
+#7 7.291 debconf: falling back to frontend: Teletype
+#7 7.342 dpkg-preconfigure: unable to re-open stdin: 
+#7 7.463 Fetched 261 kB in 0s (2797 kB/s)
+#7 7.527 Selecting previously unselected package libopus-dev:arm64.
+#7 7.527 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 25051 files and directories currently installed.)
+#7 7.568 Preparing to unpack .../libopus-dev_1.4-1build1_arm64.deb ...
+#7 7.578 Unpacking libopus-dev:arm64 (1.4-1build1) ...
+#7 7.731 Setting up libopus-dev:arm64 (1.4-1build1) ...
+#7 DONE 7.9s
+
+#8 [4/6] COPY vendor/personaplex/moshi/ /app/moshi/
+#8 DONE 0.1s
+
+#9 [5/6] RUN pip install --no-cache-dir .
+#9 0.820 Processing /app/moshi
+#9 0.822   Installing build dependencies: started
+#9 2.125   Installing build dependencies: finished with status 'done'
+#9 2.126   Getting requirements to build wheel: started
+#9 2.690   Getting requirements to build wheel: finished with status 'done'
+#9 2.692   Preparing metadata (pyproject.toml): started
+#9 2.931   Preparing metadata (pyproject.toml): finished with status 'done'
+#9 2.938 Requirement already satisfied: numpy<2.2,>=1.26 in /usr/local/lib/python3.12/dist-packages (from moshi-personaplex==0.1.0) (1.26.4)
+#9 3.170 Collecting safetensors<0.5,>=0.4.0 (from moshi-personaplex==0.1.0)
+#9 3.233   Downloading safetensors-0.4.5-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl.metadata (3.8 kB)
+#9 3.310 Collecting huggingface-hub<0.25,>=0.24 (from moshi-personaplex==0.1.0)
+#9 3.320   Downloading huggingface_hub-0.24.7-py3-none-any.whl.metadata (13 kB)
+#9 3.344 Collecting einops==0.7 (from moshi-personaplex==0.1.0)
+#9 3.352   Downloading einops-0.7.0-py3-none-any.whl.metadata (13 kB)
+#9 3.396 Collecting sentencepiece==0.2 (from moshi-personaplex==0.1.0)
+#9 3.405   Downloading sentencepiece-0.2.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl.metadata (7.7 kB)
+#9 3.427 Collecting sounddevice==0.5 (from moshi-personaplex==0.1.0)
+#9 3.434   Downloading sounddevice-0.5.0-py3-none-any.whl.metadata (1.4 kB)
+#9 3.454 Collecting sphn<0.2,>=0.1.4 (from moshi-personaplex==0.1.0)
+#9 3.463   Downloading sphn-0.1.12.tar.gz (32 kB)
+#9 3.477   Installing build dependencies: started
+#9 6.420   Installing build dependencies: finished with status 'done'
+#9 6.422   Getting requirements to build wheel: started
+#9 6.507   Getting requirements to build wheel: finished with status 'done'
+#9 6.509   Installing backend dependencies: started
+#9 8.642   Installing backend dependencies: finished with status 'done'
+#9 8.644   Preparing metadata (pyproject.toml): started
+#9 20.56   Preparing metadata (pyproject.toml): finished with status 'done'
+#9 20.56 Requirement already satisfied: torch>=2.2.0 in /usr/local/lib/python3.12/dist-packages (from moshi-personaplex==0.1.0) (2.8.0a0+34c6371d24.nv25.8)
+#9 20.93 Collecting aiohttp<3.11,>=3.10.5 (from moshi-personaplex==0.1.0)
+#9 20.94   Downloading aiohttp-3.10.11-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl.metadata (7.7 kB)
+#9 20.95 Requirement already satisfied: CFFI>=1.0 in /usr/local/lib/python3.12/dist-packages (from sounddevice==0.5->moshi-personaplex==0.1.0) (1.17.1)
+#9 20.95 Requirement already satisfied: aiohappyeyeballs>=2.3.0 in /usr/local/lib/python3.12/dist-packages (from aiohttp<3.11,>=3.10.5->moshi-personaplex==0.1.0) (2.6.1)
+#9 20.95 Requirement already satisfied: aiosignal>=1.1.2 in /usr/local/lib/python3.12/dist-packages (from aiohttp<3.11,>=3.10.5->moshi-personaplex==0.1.0) (1.4.0)
+#9 20.95 Requirement already satisfied: attrs>=17.3.0 in /usr/local/lib/python3.12/dist-packages (from aiohttp<3.11,>=3.10.5->moshi-personaplex==0.1.0) (25.3.0)
+#9 20.95 Requirement already satisfied: frozenlist>=1.1.1 in /usr/local/lib/python3.12/dist-packages (from aiohttp<3.11,>=3.10.5->moshi-personaplex==0.1.0) (1.7.0)
+#9 20.95 Requirement already satisfied: multidict<7.0,>=4.5 in /usr/local/lib/python3.12/dist-packages (from aiohttp<3.11,>=3.10.5->moshi-personaplex==0.1.0) (6.6.3)
+#9 20.95 Requirement already satisfied: yarl<2.0,>=1.12.0 in /usr/local/lib/python3.12/dist-packages (from aiohttp<3.11,>=3.10.5->moshi-personaplex==0.1.0) (1.20.1)
+#9 20.95 Requirement already satisfied: filelock in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (3.18.0)
+#9 20.95 Requirement already satisfied: fsspec>=2023.5.0 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (2025.7.0)
+#9 20.95 Requirement already satisfied: packaging>=20.9 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (23.2)
+#9 20.95 Requirement already satisfied: pyyaml>=5.1 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (6.0.2)
+#9 20.95 Requirement already satisfied: requests in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (2.32.4)
+#9 20.95 Requirement already satisfied: tqdm>=4.42.1 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (4.67.1)
+#9 20.95 Requirement already satisfied: typing-extensions>=3.7.4.3 in /usr/local/lib/python3.12/dist-packages (from huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (4.14.1)
+#9 20.96 Requirement already satisfied: idna>=2.0 in /usr/local/lib/python3.12/dist-packages (from yarl<2.0,>=1.12.0->aiohttp<3.11,>=3.10.5->moshi-personaplex==0.1.0) (3.10)
+#9 20.96 Requirement already satisfied: propcache>=0.2.1 in /usr/local/lib/python3.12/dist-packages (from yarl<2.0,>=1.12.0->aiohttp<3.11,>=3.10.5->moshi-personaplex==0.1.0) (0.3.2)
+#9 21.05 Requirement already satisfied: pycparser in /usr/local/lib/python3.12/dist-packages (from CFFI>=1.0->sounddevice==0.5->moshi-personaplex==0.1.0) (2.22)
+#9 21.06 Requirement already satisfied: sympy>=1.13.3 in /usr/local/lib/python3.12/dist-packages (from torch>=2.2.0->moshi-personaplex==0.1.0) (1.14.0)
+#9 21.06 Requirement already satisfied: networkx in /usr/local/lib/python3.12/dist-packages (from torch>=2.2.0->moshi-personaplex==0.1.0) (3.5)
+#9 21.06 Requirement already satisfied: jinja2 in /usr/local/lib/python3.12/dist-packages (from torch>=2.2.0->moshi-personaplex==0.1.0) (3.1.6)
+#9 21.07 Requirement already satisfied: setuptools in /usr/local/lib/python3.12/dist-packages (from torch>=2.2.0->moshi-personaplex==0.1.0) (79.0.1)
+#9 21.07 Requirement already satisfied: mpmath<1.4,>=1.1.0 in /usr/local/lib/python3.12/dist-packages (from sympy>=1.13.3->torch>=2.2.0->moshi-personaplex==0.1.0) (1.3.0)
+#9 21.08 Requirement already satisfied: MarkupSafe>=2.0 in /usr/local/lib/python3.12/dist-packages (from jinja2->torch>=2.2.0->moshi-personaplex==0.1.0) (3.0.2)
+#9 21.08 Requirement already satisfied: charset_normalizer<4,>=2 in /usr/local/lib/python3.12/dist-packages (from requests->huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (3.4.2)
+#9 21.08 Requirement already satisfied: urllib3<3,>=1.21.1 in /usr/local/lib/python3.12/dist-packages (from requests->huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (2.0.7)
+#9 21.08 Requirement already satisfied: certifi>=2017.4.17 in /usr/local/lib/python3.12/dist-packages (from requests->huggingface-hub<0.25,>=0.24->moshi-personaplex==0.1.0) (2025.8.3)
+#9 21.10 Downloading einops-0.7.0-py3-none-any.whl (44 kB)
+#9 21.11 Downloading sentencepiece-0.2.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (1.3 MB)
+#9 21.14    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 69.4 MB/s  0:00:00
+#9 21.15 Downloading sounddevice-0.5.0-py3-none-any.whl (32 kB)
+#9 21.16 Downloading aiohttp-3.10.11-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (1.3 MB)
+#9 21.17    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 127.4 MB/s  0:00:00
+#9 21.18 Downloading huggingface_hub-0.24.7-py3-none-any.whl (417 kB)
+#9 21.19 Downloading safetensors-0.4.5-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl (441 kB)
+#9 21.22 Building wheels for collected packages: moshi-personaplex, sphn
+#9 21.22   Building wheel for moshi-personaplex (pyproject.toml): started
+#9 21.59   Building wheel for moshi-personaplex (pyproject.toml): finished with status 'done'
+#9 21.59   Created wheel for moshi-personaplex: filename=moshi_personaplex-0.1.0-py3-none-any.whl size=86108 sha256=27dc06fd4623360e7794f595ef91eefb04e0fae6a44c6c3d8b3a9246b65e5e31
+#9 21.59   Stored in directory: /tmp/pip-ephem-wheel-cache-lsu34s14/wheels/9f/76/fa/ba7552adee2c7237c666bd231bdf4bdb2697fa2a4085998e87
+#9 21.60   Building wheel for sphn (pyproject.toml): started
+#9 47.11   Building wheel for sphn (pyproject.toml): finished with status 'done'
+#9 47.14   Created wheel for sphn: filename=sphn-0.1.12-cp312-cp312-linux_aarch64.whl size=11138386 sha256=35bedc4293c47c4a415a50be5fc674f4aaf3fc03864632e41983d1b1d2cce3b4
+#9 47.14   Stored in directory: /tmp/pip-ephem-wheel-cache-lsu34s14/wheels/ce/ab/d5/437fae19571c6808b16f9b6a970c5274b8d4ea2fe9a07dbe45
+#9 47.15 Successfully built moshi-personaplex sphn
+#9 47.42 Installing collected packages: sentencepiece, sphn, safetensors, einops, sounddevice, huggingface-hub, aiohttp, moshi-personaplex
+#9 47.70   Attempting uninstall: safetensors
+#9 47.70     Found existing installation: safetensors 0.6.2
+#9 47.70     Uninstalling safetensors-0.6.2:
+#9 47.73       Successfully uninstalled safetensors-0.6.2
+#9 47.76   Attempting uninstall: einops
+#9 47.76     Found existing installation: einops 0.8.1
+#9 47.77     Uninstalling einops-0.8.1:
+#9 47.83       Successfully uninstalled einops-0.8.1
+#9 48.14   Attempting uninstall: aiohttp
+#9 48.15     Found existing installation: aiohttp 3.12.15
+#9 48.15     Uninstalling aiohttp-3.12.15:
+#9 48.23       Successfully uninstalled aiohttp-3.12.15
+#9 48.49 
+#9 48.51 Successfully installed aiohttp-3.10.11 einops-0.7.0 huggingface-hub-0.24.7 moshi-personaplex-0.1.0 safetensors-0.4.5 sentencepiece-0.2.0 sounddevice-0.5.0 sphn-0.1.12
+#9 48.51 WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+#9 DONE 49.6s
+
+#10 [6/6] RUN mkdir -p /app/ssl
+#10 DONE 0.4s
+
+#11 exporting to image
+#11 exporting layers
+#11 exporting layers 4.2s done
+#11 writing image sha256:57de1338e00ea5cc8e412e9b7995236f1aea226eb77afcbd05a5453c8a55885b done
+#11 DONE 4.3s

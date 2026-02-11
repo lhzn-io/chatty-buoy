@@ -2,15 +2,32 @@
 name: chatty-buoy
 channels:
   - conda-forge
-  - defaults
+  - nvidia
+  - nodefaults
 dependencies:
-  - python=3.12  # Required for Thor compatibility
+  - python=3.11
   - pip
+  - cmake>=3.25
+  - rust
+  - nvidia::cuda-runtime=13.0
+  - conda-forge::cudnn>=9.0
+  - conda-forge::libstdcxx-ng>=12.0
+  - libsndfile
+  - portaudio
+  - pygobject
+  - gst-python
   - pip:
-      - --extra-index-url https://pypi.jetson-ai-lab.io/jp70
-      - torch
       - torchvision
+      - nvidia-cudss-cu13
+      - nvpl-blas
+      - nvpl-lapack
       - ultralytics
       - jetson-stats
       - opencv-python
-      - -e ../kanoa-mlops
+      - nvidia-riva-client
+      - sounddevice
+      - soundfile
+      - openai
+      - semantic-router
+      - transformers
+      - -e vendor/personaplex/moshi

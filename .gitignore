@@ -46,3 +46,16 @@ models/
 docker/
 # Archived docs (research, obsolete component studies)
 docs/_archive/
+
+
+opencv_contrib-4.11.0/
+opencv-4.11.0/
+
+*.wav
+
+# Riva Artifacts
+riva_quickstart_arm64_v*/
+riva_model_repo*/
+
+# Experiments Vendor
+experiments/personaplex/vendor/

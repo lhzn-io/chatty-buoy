@@ -1,0 +1,185 @@
+
+import sounddevice as sd
+import sounddevice as sd
+import sounddevice as sd
+import torch
+import numpy as np
+import time
+import queue
+import threading
+import scipy.signal
+from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download
+from moshi.models import loaders, LMGen
+
+# Enable TF32 for speed on Ampere/Hopper/Blackwell
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+# Enable Flash Attention (SDP)
+torch.backends.cuda.enable_flash_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(True)
+
+# CONFIG
+MIMI_RATE = 24000
+MIMI_FRAME_SIZE = 1920 # 80ms at 24kHz
+NOISE_GATE_THRESHOLD = 0.05 # Silence threshold (adjustable)
+TARGET_DEVICE_NAME = "Jabra"
+
+
+def get_device_id():
+    """Find the device ID for a device containing TARGET_DEVICE_NAME."""
+    try:
+        devices = sd.query_devices()
+        print(f"Scanning devices for '{TARGET_DEVICE_NAME}'...")
+        for i, dev in enumerate(devices):
+            if TARGET_DEVICE_NAME.lower() in dev['name'].lower():
+                print(f"Found {TARGET_DEVICE_NAME} at ID {i}: {dev['name']}")
+                return i
+        print(f"Warning: '{TARGET_DEVICE_NAME}' not found. Using default device.")
+        return sd.default.device[0]
+    except Exception as e:
+        print(f"Error querying devices: {e}")
+        return 1
+
+def main():
+    print("Initializing Quint (Simplified)...")
+    
+    # 0. Check GPU
+    if torch.cuda.is_available():
+        print(f"CUDA Available! Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("WARNING: CUDA NOT AVAILABLE. Running on CPU (will be slow).")
+
+    # 1. Load Models
+    print("Loading Models...")
+    mimi_path = hf_hub_download(loaders.DEFAULT_REPO, loaders.MIMI_NAME)
+    moshi_path = hf_hub_download(loaders.DEFAULT_REPO, loaders.MOSHI_NAME)
+    
+    mimi = loaders.get_mimi(mimi_path, device='cuda')
+    moshi = loaders.get_moshi_lm(moshi_path, device='cuda', dtype=torch.bfloat16)
+    
+    print(f"Models loaded. Mimi Device: {next(mimi.parameters()).device}, Moshi Device: {next(moshi.parameters()).device}")
+    
+    # OPTIMIZATION: Compile removed (Crashing / Device Assert)
+    # moshi = torch.compile(moshi, mode="reduce-overhead")
+
+    lm_gen = LMGen(moshi, device='cuda', temp=0.8, temp_text=0.7)
+
+    # 2. Configure Hardware
+    device_id = get_device_id()
+    dev_info = sd.query_devices(device_id)
+    HARDWARE_RATE = int(dev_info['default_samplerate'])
+    HARDWARE_FRAME_SIZE = int(HARDWARE_RATE * 0.08) # 80ms
+    print(f"Hardware: {HARDWARE_RATE}Hz, Block: {HARDWARE_FRAME_SIZE}")
+    
+    print(f"Hardware: {HARDWARE_RATE}Hz, Block: {HARDWARE_FRAME_SIZE}")
+    
+    # 5. Setup Queues for Threaded Audio
+    # Increase buffer size to handle jitter or small chunks
+    audio_in_q = queue.Queue(maxsize=100) 
+    audio_out_q = queue.Queue(maxsize=100)
+
+    # 6. Audio Callback (Run in audio thread, must be fast!)
+    def callback(indata, outdata, frames, time, status):
+        # Debug frame size consistency
+        if frames != HARDWARE_FRAME_SIZE:
+            print(f"Warning: Callback Frames={frames} != Expected={HARDWARE_FRAME_SIZE}")
+
+        # 1. PUSH MIC
+        try:
+            audio_in_q.put_nowait(indata.copy())
+        except queue.Full:
+            print("Audio In Queue Full (Overflow)")
+        
+        # 2. PULL SPK
+        try:
+            data = audio_out_q.get_nowait()
+            outdata[:] = data
+        except queue.Empty:
+            outdata.fill(0)
+
+    print("Quint is ready. Starting Threaded I/O loop...")
+
+    # 7. Start Stream
+    try:
+        with sd.Stream(device=device_id, 
+                       samplerate=HARDWARE_RATE, 
+                       blocksize=HARDWARE_FRAME_SIZE,
+                       channels=(1, 2),
+                       callback=callback): # Non-blocking callback
+            
+            with lm_gen.streaming(batch_size=1):
+                # Disable gradients
+                with torch.no_grad():
+                    print("Listening... (Press Ctrl+C to stop)")
+                    while True:
+                        # 1. Get Audio (Blocking wait on Queue)
+                        try:
+                            indata = audio_in_q.get(timeout=1.0)
+                        except queue.Empty:
+                            continue
+
+                        t_start = time.perf_counter()
+                        
+                        # NOISE GATE (Simple VAD)
+                        # Check peak amplitude
+                        vol = np.max(np.abs(indata))
+                        if vol < NOISE_GATE_THRESHOLD:
+                            # Silence - feed zeros to model to maintain state, but reset attention?
+                            # Actually, just zeroing the input works well for Moshi
+                            indata[:] = 0
+                            
+                        # B1. Resample Input (CPU - Scipy)
+                        # indata is numpy (1280, 1) -> indata_mimi (1920, 1)
+                        # NOTE: If indata length != HARDWARE_FRAME_SIZE, this stretches/shrinks audio!
+                        # But for now we assume fixed block size.
+                        indata_mimi = scipy.signal.resample(indata, MIMI_FRAME_SIZE)
+                        
+                        # Tensorize (CPU -> GPU)
+                        input_wav_mimi = torch.from_numpy(indata_mimi).to('cuda').float().transpose(0, 1).unsqueeze(0)
+
+                        # B2. Encode
+                        codes = mimi.encode(input_wav_mimi)
+                        
+                        # B3. LM Step
+                        tokens_out = lm_gen.step(codes)
+                        
+                        if tokens_out is not None:
+                            # B4. Decode
+                            wav_out_mimi = mimi.decode(tokens_out)
+                            
+                            # Detach (GPU -> CPU) & SYNC
+                            # This is where we wait for GPU to finish!
+                            t0 = time.perf_counter()
+                            mono_out_mimi = wav_out_mimi.detach().squeeze(0).transpose(0, 1).cpu().numpy()
+                            t_sync = (time.perf_counter() - t0) * 1000
+                            
+                            # B5. Resample Output (CPU - Scipy)
+                            # mono_out_mimi (1920, 1) -> mono_out_hw (1280, 1)
+                            mono_out_hw = scipy.signal.resample(mono_out_mimi, HARDWARE_FRAME_SIZE)
+                            
+                            stereo_out = np.repeat(mono_out_hw, 2, axis=1)
+                            
+                            # Push to Out Queue
+                            try:
+                                audio_out_q.put_nowait(stereo_out)
+                            except queue.Full:
+                                # This happens if audio thread stopped pulling (device disconnected?)
+                                pass 
+                        else:
+                            # Warmup silence
+                            zeros = np.zeros((HARDWARE_FRAME_SIZE, 2), dtype=np.float32)
+                            audio_out_q.put(zeros)
+                            t_sync = 0
+                            
+                        # Logging (Minimal)
+                        dt = (time.perf_counter() - t_start) * 1000
+                        if dt > 0: 
+                            print(f"Total: {dt:.1f}ms | Sync(GPU): {t_sync:.1f}ms")
+
+    except KeyboardInterrupt:
+        print("\nStopping...")
+
+
+if __name__ == "__main__":
+    main()
