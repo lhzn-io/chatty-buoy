@@ -22,14 +22,15 @@ This document outlines the realized architecture of the **Thor Semantic Audio Ag
 ### 2. Cortex (Reasoning)
 *   **Service**: `cortex-service`
 *   **Software**: `vllm` (v0.6.3.post1 / 25.12.post1)
-*   **Model**: `NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4`
+*   **Model**: `Olmo3-7B` (Primary).
+*   **Option**: `NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4` (Optimized for Thor NVFP4).
 *   **Role**: Reasoning engine. Receives text, queries memory (RAG), and generates intelligent responses.
-*   **Optimization**: Native Blackwell **FP4 Tensor Core** support via `VLLM_USE_FLASHINFER_MOE_FP4=1`.
+*   **Optimization**: Native Blackwell **FP4 Tensor Core** support via `VLLM_USE_FLASHINFER_MOE_FP4=1` (for Nemotron).
 *   **Interface**: OpenAI-Compatible API (`localhost:8000/v1`).
 
 ### 3. Voice (Speaking)
 *   **Service**: Local Process (`scripts/start_tts.sh`)
-*   **Software**: `FunAudioLLM/CosyVoice2-0.5B`
+*   **Software**: `KokoroTTS`
 *   **Runtime**: Native Python/PyTorch (FP8/BF16)
 *   **Role**: Synthesizes text into high-quality human-like speech.
 *   **Why Local?**: Eliminates x86-to-ARM (QEMU) emulation overhead found in many community Docker containers, ensuring maximum GPU utilization.
@@ -54,7 +55,7 @@ sequenceDiagram
     participant GStreamer (Agent)
     participant Riva (ASR)
     participant Triton (Cortex)
-    participant CosyVoice (TTS)
+    participant KokoroTTS (TTS)
 
     User->>GStreamer: Speaks
     GStreamer->>Riva: Stream Audio
@@ -67,7 +68,7 @@ sequenceDiagram
         Triton->>GStreamer: Text Response
     end
     
-    GStreamer->>CosyVoice: Synthesize Response
-    CosyVoice->>GStreamer: Audio Stream
+    GStreamer->>KokoroTTS: Synthesize Response
+    KokoroTTS->>GStreamer: Audio Stream
     GStreamer->>User: Plays Audio
 ```

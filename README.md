@@ -20,8 +20,8 @@ If things turn south, he's right there with you. You might think you're SOL, but
 The system runs on a **Hybrid Architecture** optimized for Jetson Thor (ARM64), balancing containerized stability with native performance:
 
 *   **Audio (Hearing)**: `nvcr.io/nvidia/riva/riva-speech:2.24.0-l4t-aarch64` (Docker). High-performance streaming speech recognition.
-*   **Cortex (Reasoning)**: `nvidia/tritonserver` (Docker). Running **Nemotron-3-Nano** (NVFP4) for reasoning.
-*   **Speaking (TTS)**: **Native Local Execution** of **CosyVoice2-0.5B**. Runs directly on Metal/CUDA for <200ms synthesis, bypassing container overhead.
+*   **Cortex (Reasoning)**: `cortex-service` (Docker). Primary: **Olmo3-7B**. Option: **Nemotron-3-Nano** (NVFP4) for Thor.
+*   **Speaking (TTS)**: **Native Local Execution** of **KokoroTTS**. Runs directly on Metal/CUDA for <200ms synthesis, bypassing container overhead.
 *   **Memory (RAG)**: `pgvector` (Docker). Vector database for long-term knowledge retention.
 
 See [Quintessential Architecture](docs/quint_architecture.md) for deep dives.
