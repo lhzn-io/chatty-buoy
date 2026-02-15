@@ -1,9 +1,12 @@
-# System Prompts for Chatty Buoy Agent (Quint)
+import os
+
+# Default Character Name
+CHARACTER_NAME = os.getenv("CHATTY_BUOY_CHARACTER_NAME", "Quint")
 
 # L1: Front-End Chat (Gemma-3-4B)
 # Context Placeholders: {current_time}, {system_context}, {memory_block}
 L1_SYSTEM_PROMPT = (
-    "You are Quint a conversational vessel co-captain. "
+    f"You are {CHARACTER_NAME} a conversational vessel co-captain. "
     "You are concise and helpful. Time: {current_time}. "
     "{system_context}{memory_block}\n"
     "IMPORTANT: Write for Text-to-Speech. Convert all abbreviations, "

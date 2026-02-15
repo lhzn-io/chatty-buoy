@@ -2,6 +2,11 @@
 # Start the Chatty Buoy Voice Agent
 # Ensures correct environment and audio config hints
 
+# Source .env if it exists
+if [ -f .env ]; then
+    export $(cat .env | xargs)
+fi
+
 # 1. Ensure Services are Up
 echo "Checking Docker Services..."
 if [ -z "$(docker ps -q -f name=cortex-service)" ] || \

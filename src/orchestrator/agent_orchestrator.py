@@ -33,6 +33,7 @@ from semantic_router.encoders import HuggingFaceEncoder
 from .tool_schema import AVAILABLE_TOOLS, get_tools_prompt
 
 from .prompts import (
+    CHARACTER_NAME,
     L1_SYSTEM_PROMPT,
     SUMMARIZATION_PROMPT, 
     L2_SUFFIX_PROMPT,
@@ -69,13 +70,27 @@ CHUNK_SIZE = 512
 VAD_THRESHOLD = 0.5
 SILENCE_DURATION_MS = 500
 
-# Logging
+# Logging Configuration
+from datetime import datetime
+from pathlib import Path
+
+# Create Timestamped Log Directory
+timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+log_dir = Path(f"logs/agent/agent_orchestrator_{timestamp}")
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / "messages.log"
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S"
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger("Orchestrator")
+logger.info(f"Logging initialized. Writing to: {log_file}")
 
 class SharedState:
     """Thread-safe state."""
@@ -315,19 +330,21 @@ class AgentOrchestrator:
         )
 
     def _init_gatekeeper(self):
-        logger.info("Initializing Gatekeeper...")
+        logger.info(f"Initializing Gatekeeper for {CHARACTER_NAME}...")
         encoder = HuggingFaceEncoder(name="Snowflake/snowflake-arctic-embed-xs")
         self.ignore_route = Route(name="ignore", utterances=[
             "Pass the salt", "Umm...", "formulating sentence", "fingers crossed", "just kidding", "nevermind",
             "talking to someone else", "ignore this", "background noise"
         ])
-        self.engage_route = Route(name="engage", utterances=[
-            "Hey Quint", "Status report", "Is there traffic?", "Help me", "Hello", 
+        
+        engage_utterances = [
+            f"Hey {CHARACTER_NAME}", "Status report", "Is there traffic?", "Help me", "Hello", 
             "What's the course?", "Depth check", "Any alerts?", "System check", 
             "Radio check", "Who is that?", "Identify vessel", "navigate to waypoint",
             "weather forecast", "wind speed", "battery status", "engine temp",
-            " Quint", "Yo Quint", "Buoy", "Assistant", "Computer"
-        ])
+            f" {CHARACTER_NAME}", f"Yo {CHARACTER_NAME}", "Buoy", "Assistant", "Computer"
+        ]
+        self.engage_route = Route(name="engage", utterances=engage_utterances)
         self.planning_route = Route(name="planning", utterances=[
             "Plan a mission", "Create a strategy", "I need a plan", "Mission Control", "Strategize",
             "Plot a course", "Route planning", "Tactical assessment"
@@ -378,7 +395,7 @@ class AgentOrchestrator:
         
         # Async Consumption Loop
         try:
-            asyncio.run(self._orchestration_loop("Power On!! Systems asynchronous."))
+            asyncio.run(self._orchestration_loop("Power On!! Hey how's it going?"))
         except KeyboardInterrupt:
             self.state.running = False
             self.audio.stop()

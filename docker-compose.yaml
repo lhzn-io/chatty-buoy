@@ -59,7 +59,7 @@ services:
     image: nvcr.io/nvidia/vllm:25.12.post1-py3
     container_name: front-end-service
     runtime: nvidia
-    restart: "no"
+    restart: unless-stopped
     ipc: host
     environment:
       - CUDA_VISIBLE_DEVICES=0
@@ -72,7 +72,7 @@ services:
       vllm serve google/gemma-3-4b-it 
       --quantization fp8 
       --dtype bfloat16 
-      --gpu-memory-utilization 0.2 
+      --gpu-memory-utilization 0.15 
       --max-model-len 4096
       --host 0.0.0.0
       --port 8001
@@ -85,13 +85,21 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      dispatcher-service:
+        condition: service_healthy
 
   # 4. Dispatcher (L2): FunctionGemma-270m
   dispatcher-service:
     image: nvcr.io/nvidia/vllm:25.12.post1-py3
     container_name: dispatcher-service
     runtime: nvidia
-    restart: "no"
+    restart: unless-stopped
     ipc: host
     environment:
       - CUDA_VISIBLE_DEVICES=0
@@ -101,7 +109,7 @@ services:
     command: >
       vllm serve google/functiongemma-270m-it 
       --dtype bfloat16 
-      --gpu-memory-utilization 0.2 
+      --gpu-memory-utilization 0.1 
       --max-model-len 4096
       --host 0.0.0.0
       --port 8002
@@ -114,13 +122,18 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8002/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # 5. Cortex Service (L3): AllenAI Olmo-3-7B-Think (Reasoning)
   cortex-service:
     image: nvcr.io/nvidia/vllm:25.12.post1-py3
     container_name: cortex-service
     runtime: nvidia
-    restart: "no"
+    restart: unless-stopped
     ipc: host
     environment:
       - CUDA_VISIBLE_DEVICES=0
@@ -145,6 +158,9 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    depends_on:
+      front-end-service:
+        condition: service_healthy
     entrypoint: ["/bin/bash", "/opt/start_cortex.sh"]
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
