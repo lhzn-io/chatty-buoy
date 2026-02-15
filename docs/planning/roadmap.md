@@ -23,7 +23,7 @@ This roadmap tracks the evolution of **Chatty Buoy**, from its initial foundatio
 - [x] **Hotword Router**: L0 Gatekeeper detects "Plan", "Mission", "Strategy".
 - [x] **Meta-Planner**: Direct L0 -> L3 handoff for strategic plan generation.
 
-## Phase 3: Vision & Situational Awareness (In Progress)
+## Phase 3: Situational Awareness (In Progress)
 **Goal**: Give the agent eyes without blinding the brain.
 ### Phase 3.1: "The Watchstander" (Fast Stream / DLA) - **IN PROGRESS**
 **Objective**: Real-time safety monitoring using low-power hardware (DLA).

@@ -54,8 +54,12 @@ async def test_agent_pipeline():
             "max_tokens": 10
         }
         res_l3 = await check_service(session, "L3 Cortex", L3_URI, l3_payload)
+
+        # 4. Test TTS (Chatterbox)
+        tts_payload = {"text": "Integration test.", "tags": []}
+        res_tts = await check_service(session, "TTS Voice", "http://localhost:8003/generate", tts_payload)
         
-        assert res_l1 and res_l2 and res_l3, "One or more services failed."
+        assert res_l1 and res_l2 and res_l3 and res_tts, "One or more services failed."
 
 if __name__ == "__main__":
     asyncio.run(test_agent_pipeline())

@@ -2,25 +2,12 @@ from typing import List, Dict, Any
 
 # Tool Definitions for FunctionGemma (L2)
 
-AIS_TOOL = {
-    "name": "get_ais_targets",
-    "description": "Get a list of AIS (Automatic Identification System) targets (ships) within a specific radius.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "radius_nm": {
-                "type": "integer",
-                "description": "Search radius in nautical miles.",
-                "default": 5
-            }
-        },
-        "required": ["radius_nm"]
-    }
-}
+# Tool Definitions for FunctionGemma (L2)
+# Removed AIS_TOOL (Placeholder)
 
 SYSTEM_TOOL = {
-    "name": "get_system_status",
-    "description": "Get the current hardware status of the agent (CPU, GPU, RAM, Temp).",
+    "name": "get_jetson_telemetry",
+    "description": "Get the current hardware status of the Jetson module (CPU, GPU, RAM, Power, Temperature). Use this when the user asks for 'status report' or 'system check'.",
     "parameters": {
         "type": "object",
         "properties": {},
@@ -51,7 +38,7 @@ NAV_TOOL = {
     }
 }
 
-AVAILABLE_TOOLS = [AIS_TOOL, SYSTEM_TOOL, NAV_TOOL]
+AVAILABLE_TOOLS = [SYSTEM_TOOL, NAV_TOOL]
 
 def get_tools_prompt() -> str:
     """

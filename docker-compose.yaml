@@ -27,20 +27,23 @@ services:
               count: 1
               capabilities: [gpu]
 
-  # 2. TTS Service (F5-TTS)
-  # 2. TTS Service (Kokoro-82M - Speed Demon)
+  # 2. TTS Service (Chatterbox-Turbo - Quint Persona)
   tts-service:
     build:
       context: .
-      dockerfile: src/voice/Dockerfile.kokoro
-    image: lhzn/kokoro:thor
+      dockerfile: docker/voice/Dockerfile
+    image: lhzn/chatterbox:thor
     container_name: tts-service
     runtime: nvidia
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      - USE_GPU=true
+      #- VOICE_REF_FILE=quint-processed.wav
+      #- VOICE_REF_FILE=ahab-life-amid-mild-seas.wav
+      - VOICE_REF_FILE=jerry_seinfeld_prompt.wav
+    volumes:
+      - ./config:/app/config
     ports:
-      - "50000:8880"
+      - "8003:8000"
     networks:
       - agent-net
     deploy:
@@ -50,9 +53,6 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-
-
-
 
   # 3. Front-End (L1): Gemma-3-4B
   front-end-service:
@@ -72,8 +72,9 @@ services:
       vllm serve google/gemma-3-4b-it 
       --quantization fp8 
       --dtype bfloat16 
-      --gpu-memory-utilization 0.15 
-      --max-model-len 8192
+      --gpu-memory-utilization 0.2 
+      --max-model-len 4096
+      --host 0.0.0.0
       --port 8001
     ports:
       - "8001:8001"
@@ -100,8 +101,9 @@ services:
     command: >
       vllm serve google/functiongemma-270m-it 
       --dtype bfloat16 
-      --gpu-memory-utilization 0.1 
+      --gpu-memory-utilization 0.2 
       --max-model-len 4096
+      --host 0.0.0.0
       --port 8002
     ports:
       - "8002:8002"
@@ -113,7 +115,7 @@ services:
               count: 1
               capabilities: [gpu]
 
-  # 5. Cortex Service (L3): Nemotron-3-Nano-30B (Deep Reasoning)
+  # 5. Cortex Service (L3): AllenAI Olmo-3-7B-Think (Reasoning)
   cortex-service:
     image: nvcr.io/nvidia/vllm:25.12.post1-py3
     container_name: cortex-service
@@ -122,11 +124,8 @@ services:
     ipc: host
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      - VLLM_USE_FLASHINFER_MOE_FP4=1
-      - VLLM_FLASHINFER_MOE_BACKEND=throughput
+      - VLLM_USE_FLASHINFER_MOE_FP4=0 # Disable FP4 for Llama
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-      - VLLM_USE_FLASHINFER_MOE_FP4=1
-      - VLLM_FLASHINFER_MOE_BACKEND=throughput
       - MAX_JOBS=12
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface

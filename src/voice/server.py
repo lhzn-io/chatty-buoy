@@ -1,125 +1,121 @@
 
+import logging
 import os
-import sys
-import uvicorn
-import json
-import numpy as np
 import io
-import soundfile as sf
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+import torch
+import numpy as np
+import uvicorn
+from fastapi import FastAPI, HTTPException, Body
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+from typing import List, Optional
 
-app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ChatterboxServer")
 
-# --- State ---
+# Optimization for Jetson/Ampere+
+torch.set_float32_matmul_precision('high')
+# torch.backends.cudnn.benchmark = True # Optional, might help if input sizes are constant
+
+app = FastAPI(title="Chatterbox-Turbo Service")
+
+# Global Model & Conditionals
 model = None
-VOICE_PROFILE_PATH = "config/voice_profile.json"
-voice_profile = None
+conds = None
+audio_config = None
 
-class TTSRequest(BaseModel):
-    input: str # OpenAI style: 'input' is the text
-    voice: str = "default"
-    model: str = "cosyvoice-2-0.5b"
+# Configurable Voice Reference
+VOICE_REF_FILENAME = os.getenv("VOICE_REF_FILE", "quint-processed.wav")
+REFERENCE_PATH = os.path.join("/app/config", VOICE_REF_FILENAME)
 
-# --- Logic ---
+class GenerateRequest(BaseModel):
+    text: str
+    tags: Optional[List[str]] = None
 
 @app.on_event("startup")
-async def startup_event():
-    global model, voice_profile
-    print("[TTS] Initializing CosyVoice2 Server...")
-    
-    # 1. Load Voice Profile (Reference Audio + Text)
-    if os.path.exists(VOICE_PROFILE_PATH):
-        try:
-            with open(VOICE_PROFILE_PATH, 'r') as f:
-                voice_profile = json.load(f)
-            print(f"[TTS] Loaded Voice Profile from {VOICE_PROFILE_PATH}")
-            # Ensure audio path is absolute or relative
-            if not os.path.isabs(voice_profile['audio_path']):
-                voice_profile['audio_path'] = os.path.abspath(voice_profile['audio_path'])
-        except Exception as e:
-            print(f"[TTS] Error loading voice profile: {e}")
-
-
-    # 2. Load Model
+async def load_model():
+    global model, conds
+    logger.info("Loading Chatterbox-Turbo...")
     try:
-        # Add local repo to path
-        repo_path = os.path.join(os.path.dirname(__file__), "CosyVoice_repo")
-        sys.path.insert(0, repo_path)
-        sys.path.insert(0, os.path.join(repo_path, "third_party", "Matcha-TTS"))
-
-        from cosyvoice.cli.cosyvoice import CosyVoice
-        from cosyvoice.utils.file_utils import load_wav
+        from chatterbox import ChatterboxTTS
         
-        # Determine model path (auto-download from HF/ModelScope)
-        # Using ModelScope ID (iic organization)
-        print("[TTS] Loading Model 'iic/CosyVoice2-0.5B'...")
-        # Note: fp16=True is default usually. 
-        model = CosyVoice('iic/CosyVoice2-0.5B')
-        print("[TTS] Model Loaded Successfully.")
-        
-    except ImportError as e:
-        print(f"[TTS] CRITICAL: 'cosyvoice' package not found in {repo_path}. Error: {e}")
-        print("[TTS] Running in MOCK mode.")
-    except Exception as e:
-        print(f"[TTS] CRITICAL: Model load failed: {e}. Running in MOCK mode.")
+        # Load Model
+        logger.info("Loading Model...")
+        model = ChatterboxTTS.from_pretrained("cuda")
+        logger.info("Model loaded.")
 
-@app.post("/v1/audio/speech")
-@app.post("/generate") # Legacy
-async def generate_speech(req: TTSRequest):
-    global model, voice_profile
-    text = req.input
-    print(f"[TTS] Generating: '{text[:50]}...'")
-
-    if model is None:
-        # Mock Response (Sine Wave)
-        sr = 22050
-        t = np.linspace(0, 1.0, int(sr * 1.0))
-        audio = 0.5 * np.sin(2 * np.pi * 440 * t)
-        
-        buffer = io.BytesIO()
-        sf.write(buffer, audio, sr, format='WAV')
-        return Response(content=buffer.getvalue(), media_type="audio/wav")
-
-    try:
-        from cosyvoice.utils.file_utils import load_wav
-        output = []
-
-        # Mode Selection
-        if voice_profile and os.path.exists(voice_profile['audio_path']):
-            # Zero-Shot Cloning
-            prompt_speech_16k = load_wav(voice_profile['audio_path'], 16000)
-            prompt_text = voice_profile['prompt_text']
-            
-            # Inference
-            # Returns generator? CosyVoice.inference_zero_shot returns generator of {'tts_speech': tensor}
-            results = model.inference_zero_shot(text, prompt_text, prompt_speech_16k)
+        # Load Conditionals (Caching)
+        if os.path.exists(REFERENCE_PATH):
+            logger.info(f"Loading reference audio: {REFERENCE_PATH}")
+            # Ensure the model processes this only once
+            conds = model.prepare_conditionals(REFERENCE_PATH)
+            logger.info("Conditionals cached.")
         else:
-            # SFT / Pre-trained
-            # '中文女' is a default SFT speaker often used as fallback
-            results = model.inference_sft(text, '中文女') # Or instruct? 
+            logger.warning(f"Reference audio not found at {REFERENCE_PATH}. Generation may fail or fallback.")
+            
+        # Warmup (Compile CUDA Kernels)
+        logger.info("Running warmup inference...")
+        warmup_text = "Yellow Leather, Yellow Leather, She sells seashells by the seashore."
+        if conds is not None:
+            _ = model.generate(warmup_text, conditionals=conds)
+        else:
+            _ = model.generate(warmup_text)
+        logger.info("Warmup complete.")
+            
+    except Exception as e:
+        logger.error(f"Failed to load model: {e}")
+        raise e
 
-        # Aggregate Audio
-        # results is a generator. We need to concat.
-        audio_chunks = []
-        for res in results:
-            audio_chunks.append(res['tts_speech'].numpy())
+@app.post("/generate")
+async def generate_audio(req: GenerateRequest):
+    global model, conds
+    
+    if not model:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    text = req.text
+    # Inject tags if provided
+    if req.tags:
+        # Simple injection: prepend tags. 
+        # Logic: If text starts with tag, don't duplicate. Otherwise prepend.
+        # But user wants specific logic? 
+        # "Pre-process text: If tags are present, inject them. (e.g., '[sigh] ' + text)."
+        # We'll just join them.
+        tags_str = "".join([f"[{tag}] " for tag in req.tags])
+        text = tags_str + text
         
-        final_audio = np.concatenate(audio_chunks)
+    logger.info(f"Generating: '{text}'")
+
+    try:
+        # Generate
+        # model.generate returns audio_tensor (1, T) usually
+        # Using cached conds
+        if conds is not None:
+            audio = model.generate(text, conditionals=conds)
+        else:
+             # Fallback if no ref provided (might look for default or fail)
+            audio = model.generate(text, audio_prompt_path=REFERENCE_PATH if os.path.exists(REFERENCE_PATH) else None)
+            
+        # Convert to PCM 16-bit
+        # Expected native rate is 24kHz
+        audio = audio.squeeze().cpu().numpy()
         
-        # Convert to WAV bytes
-        buffer = io.BytesIO()
-        # CosyVoice is usually 22050Hz or 24000Hz? 
-        # API usually returns 22050 for CosyVoice1, check 2.
-        # Assuming 22050.
-        sf.write(buffer, final_audio, 22050, format='WAV')
+        # Normalize/Clip
+        audio = np.clip(audio, -1.0, 1.0)
         
-        return Response(content=buffer.getvalue(), media_type="audio/wav")
+        # Float32 -> Int16
+        audio_int16 = (audio * 32767).astype(np.int16)
+        
+        # Return Raw PCM Bytes
+        return Response(content=audio_int16.tobytes(), media_type="application/octet-stream")
 
     except Exception as e:
-        print(f"[TTS] Generation Error: {e}")
+        logger.error(f"Generation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "model_loaded": model is not None, "conds_loaded": conds is not None}
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=50000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

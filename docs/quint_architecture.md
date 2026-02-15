@@ -1,74 +1,95 @@
-# Quintessential Architecture: The "Speed Demon" Hybrid Stack
+# Quintessential Architecture: The "Async Cascade" Stack
 
-This document outlines the realized architecture of the **Thor Semantic Audio Agent**, designed specifically for the NVIDIA Jetson AGX Thor. It prioritizes ultra-low latency (<500ms), offline capability, and high-fidelity voice interaction.
+This document outlines the realized architecture of the **Thor Semantic Audio Agent**. It prioritizes ultra-low latency (<500ms) for chat, asynchronous deep reasoning for complex tasks, and robust tool integration.
 
 ## Core Philosophy
 
-1.  **Hybrid Compute**: 
-    *   **Docker Containers** for heavy, standardized infrastructure (ASR, Cortex, Memory).
-    *   **Native Execution** for latency-sensitive or hardware-specific components (TTS on Metal/CUDA, Audio I/O).
-2.  **Modular Microservices**: Each component (Audio, Cortex, Voice) is independent, allowing for individual scaling and model upgrades.
-3.  **Data-Centric Memory**: A centralized Vector Database (Postgres) serves as the "Long Term Memory," accessible to the Cortex for RAG.
+1.  **Async Fork**: Split the conversation flow into two parallel tracks:
+    *   **L1 (Fast Chat)**: Immediate, conversational response using a lightweight model (`Gemma-3-4B`).
+    *   **L2 (Dispatcher)**: Simultaneous analysis of intent for tool calling using a specialized model (`FunctionGemma`).
+2.  **Deep Reasoning (L3)**: When tools are called or complex planning is needed, the `dispatcher` invokes the **Cortex** (`Nemotron-30B` or `Olmo-3-7B-Think`) to analyze data and formulate strategic responses.
+3.  **Hybrid Compute**: 
+    *   **Docker Containers** for standardized AI services (ASR, L1, L2, L3).
+    *   **Native Execution** for audio I/O and orchestration to minimize latency.
 
 ## The Stack
 
 ### 1. Audio (Hearing)
 *   **Service**: `asr-service`
-*   **Software**: NVIDIA Riva (Release 2.24.0-l4t-aarch64)
+*   **Software**: NVIDIA Riva (Release 2.24.0)
 *   **Model**: `Parakeet-TDT-1.1B` (Streaming Transducer)
-*   **Role**: Converts raw audio stream to text in real-time with high accuracy and noise robustness.
-*   **Protocol**: gRPC streaming.
+*   **Role**: real-time speech-to-text.
 
-### 2. Cortex (Reasoning)
+### 2. The Brains (Cognition)
+The agent uses a tiered cognitive architecture:
+
+#### L1: Front-End (Chatter)
+*   **Service**: `front-end-service`
+*   **Model**: `google/gemma-3-4b-it`
+*   **Role**: Persona, Chit-chat, Memory Summarization.
+*   **Latency**: < 200ms TTFT.
+
+#### L2: Dispatcher (Reflex)
+*   **Service**: `dispatcher-service`
+*   **Model**: `google/functiongemma-270m-it`
+*   **Role**: Tool Selection & Argument Parsing.
+*   **Schema**: Defined in `src/orchestrator/tool_schema.py`.
+
+#### L3: Cortex (Reasoning)
 *   **Service**: `cortex-service`
-*   **Software**: `vllm` (v0.6.3.post1 / 25.12.post1)
-*   **Model**: `Olmo3-7B` (Primary).
-*   **Option**: `NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4` (Optimized for Thor NVFP4).
-*   **Role**: Reasoning engine. Receives text, queries memory (RAG), and generates intelligent responses.
-*   **Optimization**: Native Blackwell **FP4 Tensor Core** support via `VLLM_USE_FLASHINFER_MOE_FP4=1` (for Nemotron).
-*   **Interface**: OpenAI-Compatible API (`localhost:8000/v1`).
+*   **Model**: `allenai/Olmo-3-7B-Think` OR `nvidia/Nemotron-3-30B`
+*   **Role**: Strategic Planning, RAG, Complex Analysis, Output Formulation.
 
-### 3. Voice (Speaking)
-*   **Service**: Local Process (`scripts/start_tts.sh`)
-*   **Software**: `KokoroTTS`
-*   **Runtime**: Native Python/PyTorch (FP8/BF16)
-*   **Role**: Synthesizes text into high-quality human-like speech.
-*   **Why Local?**: Eliminates x86-to-ARM (QEMU) emulation overhead found in many community Docker containers, ensuring maximum GPU utilization.
+### 3. Voice Synthesis (TTS) - "The Voice"
+**Engine:** Chatterbox-Turbo (350M)
+**Why:**
+- **Expressivity:** Native support for paralinguistic tags (`[laughter]`, `[sighs]`, `[breaths]`).
+- **Latency:** ~200ms time-to-first-audio.
+- **Persona:** Finetuned/Prompted with "Quint" voice profile (`quint-processed.wav`).
 
-### 4. Memory (RAG)
-*   **Service**: `postgres-vector`
-*   **Software**: PostgreSQL 17 + `pgvector` extension
-*   **Role**: Stores embeddings of documents (PDFs, manuals, logs).
-*   **Ingestion**: `rag_ingest.py` parses and indexes content.
+**Configuration:**
+- **Input:** Text + Tags (e.g. `"[sigh] I don't know about that."`)
+- **Output:** 24kHz PCM Audio.
+- **Hardware:** GPU 0 (Thor).
 
-### 5. The "Reflex" Orchestrator
-*   **Component**: `src/agent_reflex.py`
-*   **Role**: The central nervous system.
-    *   **Audio Pipeline**: GStreamer (ALSA Src -> VAD -> Riva -> ALSA Sink).
-    *   **Logic**: Manages turn-taking, barge-in (interruption), and routing (Simple Reflexes vs. Deep Reasoning).
+> **Note (Fallback):** The lightweight **Kokoro-82M** model is preserved in `src/voice/Kokoro-FastAPI` as a fallback option for extremely constrained environments or CPU-only deployment.
+*   **Component**: `src/orchestrator/agent_orchestrator.py`
+*   **Role**: 
+    *   Manages Audio streams (SoundDevice + VAD).
+    *   **Async Fork**: Sends user text to L1 and L2 simultaneously.
+    *   **Tool Execution**: Executes tools from L2, feeds results to L3.
+    *   **State Management**: Handling Interrupts and Threading.
 
-## Data Flow
+## Data Flow: The Async Cascade
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant GStreamer (Agent)
-    participant Riva (ASR)
-    participant Triton (Cortex)
-    participant KokoroTTS (TTS)
+    participant Orchestrator
+    participant L1 (Gemma-4B)
+    participant L2 (Dispatcher)
+    participant Tools (System)
+    participant L3 (Cortex)
 
-    User->>GStreamer: Speaks
-    GStreamer->>Riva: Stream Audio
-    Riva->>GStreamer: Partial Transcript
-    Riva->>GStreamer: Final Transcript
-    
+    User->>Orchestrator: Audio Input
+    Orchestrator->>Orchestrator: ASR & VAD
+
     rect rgb(20, 20, 20)
-        Note over GStreamer: "Reflex" Decision Layer
-        GStreamer->>Triton: Send Query (if complex)
-        Triton->>GStreamer: Text Response
+        note right of Orchestrator: Async Fork
+        par Parallel Execution
+            Orchestrator->>L1 (Gemma-4B): Chat Query
+            L1 (Gemma-4B)->>Orchestrator: Streaming Text (TTS)
+        and
+            Orchestrator->>L2 (Dispatcher): Tool Check
+            L2 (Dispatcher)->>Orchestrator: JSON Tool Call (if any)
+        end
     end
-    
-    GStreamer->>KokoroTTS: Synthesize Response
-    KokoroTTS->>GStreamer: Audio Stream
-    GStreamer->>User: Plays Audio
+
+    alt Tool Call Received
+        Orchestrator->>Tools: Execute (e.g., get_jetson_telemetry)
+        Tools->>Orchestrator: Result (JSON/Text)
+        Orchestrator->>L3 (Cortex): Analyze Result & Plan
+        L3 (Cortex)->>Orchestrator: Strategic Response
+        Orchestrator->>User: Audio Output (Update)
+    end
 ```
