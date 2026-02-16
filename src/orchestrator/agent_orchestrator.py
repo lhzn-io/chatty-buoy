@@ -65,14 +65,25 @@ L3_MODEL = "allenai/Olmo-3-7B-Think"
 CHATTERBOX_URI = "http://localhost:8003/generate"
 
 # Audio Config
-SAMPLE_RATE = 16000
-CHUNK_SIZE = 512
+# Audio Config
+HW_INPUT_RATE = 16000  # Native Jabra Input
+HW_OUTPUT_RATE = 48000 # Native Jabra Output
+SAMPLE_RATE = 16000    # For legacy references / VAD
+TTS_RATE = int(os.environ.get("TTS_SAMPLE_RATE", 24000))       # Source from TTS (Default 24k, overrides for 48k)
+
+# 32ms Buffers
+INPUT_CHUNK_SIZE = 512   
+OUTPUT_CHUNK_SIZE = 1536 
+
 VAD_THRESHOLD = 0.5
 SILENCE_DURATION_MS = 500
 
 # Logging Configuration
 from datetime import datetime
 from pathlib import Path
+
+import sys
+print("DEBUG: AgentOrchestrator starting...", file=sys.stderr, flush=True)
 
 # Create Timestamped Log Directory
 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -184,65 +195,113 @@ class SileroVAD:
         self._context = x[:, -64:]
         return out[0][0]
 
+    def __init__(self, target_rate=24000, output_rate=48000):
+        self.target_rate = target_rate
+        self.output_rate = output_rate
+        self.last_sample = None # State for interpolation
+        
+    def resample(self, audio_chunk: np.ndarray) -> np.ndarray:
+        # Custom "Pivot" Implementation: Simple Linear 2x Upsampler (NumPy)
+        # Avoids deprecated 'audioop' and heavy 'scipy' dependencies.
+        # Logic: 24k -> 48k is exactly 2x.
+        # We interleave interpolated samples: [Interp0, Raw0, Interp1, Raw1...]
+        
+        if len(audio_chunk) == 0: return np.array([], dtype=np.int16)
+
+        # Prepare state
+        prev_last = self.last_sample if self.last_sample is not None else audio_chunk[0]
+        
+        # Create extended sequence: [prev_last, ...chunk]
+        # We cast to float for precision during mean calculation
+        full_seq = np.concatenate(([prev_last], audio_chunk)).astype(np.float32)
+        
+        # Calculate midpoints: (Seq[i] + Seq[i+1]) / 2
+        interp = (full_seq[:-1] + full_seq[1:]) * 0.5
+        
+        # Raw samples (the original chunk)
+        # We shift by 1 because full_seq[0] is prev_last
+        raw = full_seq[1:]
+        
+        # Interleave
+        # Out[2i] = Interp[i] (Half-sample shift delay)
+        # Out[2i+1] = Raw[i]
+        out = np.empty(len(audio_chunk) * 2, dtype=np.int16)
+        out[0::2] = interp.astype(np.int16)
+        out[1::2] = raw.astype(np.int16)
+        
+        # Update state
+        self.last_sample = audio_chunk[-1]
+        
+        return out
+
 class AudioService:
-    """Manages SoundDevice Bidirectional Stream for Hardware AEC Support."""
+    """Manages SoundDevice Separate Streams for Hardware Support."""
     def __init__(self, state: SharedState):
         self.state = state
         self.input_queue = queue.Queue()
-        self.output_buffer = queue.Queue() # Queue of audio chunks (bytes or np arrays)
+        self.output_buffer = queue.Queue() # Queue of 48kHz chunks
         self.current_out_chunk = None
         self.current_out_pos = 0
-        self.stream = None
+        self.input_stream = None
+        self.output_stream = None
         
-    def audio_callback(self, indata, outdata, frames, time, status):
-        """Bidirectional callback: Captures Mic, Plays Speaker."""
-        if status: logger.warning(f"Audio Status: {status}")
+        # Jitter Buffer
+        self.buffering = True 
+        self.min_buffer_size = 2
         
-        # 1. INPUT (Mic) -> Push to Input Queue
+    def input_callback(self, indata, frames, time, status):
+        """Callback for Microphone Input (16kHz)."""
+        if status: logger.warning(f"Input Status: {status}")
         self.input_queue.put(bytes(indata))
+
+    def output_callback(self, outdata, frames, time, status):
+        """Callback for Speaker Output (48kHz)."""
+        if status: logger.warning(f"Output Status: {status}")
         
-        # 2. OUTPUT (Speaker) -> Pull from Output Buffer
+        # DEBUG: Log first callback to verify stream is running
+        if not hasattr(self, '_first_callback_seen'):
+             logger.info("🔊 Output Callback Started! System is pulling audio.")
+             self._first_callback_seen = True
         
-        # Check for Interruption
         if self.state.interrupt_event.is_set():
-            # Clear entire buffer immediately
             try:
                 while True: self.output_buffer.get_nowait()
-            except queue.Empty:
-                pass
+            except queue.Empty: pass
             self.current_out_chunk = None
             self.current_out_pos = 0
+            self.buffering = True
             self.state.is_agent_speaking = False
             outdata.fill(0)
             return
 
-        # outdata is (frames, channels) float32 or int16
         outdata.fill(0)
-        
         frames_to_fill = frames
         out_offset = 0
         
         while frames_to_fill > 0:
             if self.current_out_chunk is None:
                 try:
-                    # Get next chunk from queue (non-blocking)
+                    if self.buffering:
+                         if self.output_buffer.qsize() >= self.min_buffer_size:
+                             self.buffering = False
+                         else:
+                             break
+                    
                     item = self.output_buffer.get_nowait()
-                    # Expecting item to be numpy array of correct dtype
                     self.current_out_chunk = item
                     self.current_out_pos = 0
                     self.state.is_agent_speaking = True
                 except queue.Empty:
+                    if not self.buffering:
+                        if self.min_buffer_size < 10: self.min_buffer_size += 1
+                        self.buffering = True
                     self.state.is_agent_speaking = False
                     break
             
-            # We have a chunk
             chunk_len = len(self.current_out_chunk)
             remaining_in_chunk = chunk_len - self.current_out_pos
-            
             can_copy = min(frames_to_fill, remaining_in_chunk)
             
-            # Copy data
-            # Assuming mono for now
             target_end = out_offset + can_copy
             source_end = self.current_out_pos + can_copy
             
@@ -252,49 +311,88 @@ class AudioService:
             frames_to_fill -= can_copy
             self.current_out_pos += can_copy
             
-            # Check if chunk finished
             if self.current_out_pos >= chunk_len:
                 self.current_out_chunk = None
                 self.current_out_pos = 0
 
     def start(self):
-        # Find Jabra or default
-        dev_idx = None
-        for idx, dev in enumerate(sd.query_devices()):
-            # Look for Jabra (Input Channels > 0 just to be safe, but we need bidirectional)
-            if "Jabra" in dev['name']:
-                dev_idx = idx
+        jabra_idx = None
+        pipewire_idx = None
+        
+        devices = sd.query_devices()
+        for i, dev in enumerate(devices):
+            name = dev['name'].lower()
+            if "jabra" in name:
+                jabra_idx = i
                 break
+            if "pipewire" in name or "pulse" in name:
+                 pipewire_idx = i
         
-        if dev_idx is None:
-             logger.warning("Jabra not found, using default device.")
-             # Fallback to default
-             # dev_idx = sd.default.device # This returns [in, out] tuple or scalar
-             # We'll just let None default to system default
-             
-        self.state.output_device_idx = dev_idx
-        logger.info(f"Starting Audio Stream on Device Level: {dev_idx}")
+        # Priority: Jabra -> PipeWire -> Default (None)
+        target_device = jabra_idx if jabra_idx is not None else pipewire_idx
         
-        # Open Bidirectional Stream
-        # dtype='int16' is standard for ASR/TTS usually, but SD uses float32 often.
-        # Our TTS returns int16. Riva expects int16.
-        self.stream = sd.Stream(
-            samplerate=SAMPLE_RATE,
-            blocksize=CHUNK_SIZE,
-            device=dev_idx,
-            channels=1,
-            dtype='int16',
-            callback=self.audio_callback
-        )
-        self.stream.start()
+        if target_device is not None:
+            dev_name = devices[target_device]['name']
+            logger.info(f"Found Audio Device: '{dev_name}' (ID: {target_device})")
+        else:
+            logger.warning("Jabra/PipeWire not found, using system default.")
+
+        logger.info(f"Starting Audio Streams on Device Level: {target_device}")
+
+        # 1. Input Stream (Microphone) - Native 16k
+        def input_callback(indata, frames, time_info, status):
+             if status:
+                 logger.warning(f"Input Status: {status}")
+             self.input_queue.put(bytes(indata))
+
+        try:
+            self.input_stream = sd.InputStream(
+                device=target_device,
+                samplerate=HW_INPUT_RATE,
+                channels=1,
+                dtype='int16',
+                blocksize=INPUT_CHUNK_SIZE,
+                callback=input_callback
+            )
+            self.input_stream.start()
+            logger.info("Input Stream Started @ 16kHz")
+
+            # Output Stream (48k)
+            self.output_stream = sd.OutputStream(
+                samplerate=HW_OUTPUT_RATE,
+                blocksize=OUTPUT_CHUNK_SIZE,
+                device=target_device,
+                channels=1,
+                dtype='int16',
+                callback=self.output_callback
+            )
+            self.output_stream.start()
+            logger.info("Output Stream Started @ 48kHz")
+            
+            # WARMUP SILENCE: Inject 1s of silence to prime buffer/device
+            try:
+                 silence = np.zeros(int(HW_OUTPUT_RATE * 1.0), dtype=np.int16)
+                 self.queue_audio_for_playback(silence)
+                 logger.info("Output Buffer Primed with Silence.")
+            except Exception as e:
+                 logger.warning(f"Failed to prime output: {e}")
+            
+        except Exception as e:
+            logger.error(f"Failed to start audio streams: {e}")
+            self.stop()
+            raise e
 
     def stop(self):
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
+        if self.input_stream:
+            self.input_stream.stop()
+            self.input_stream.close()
+            self.input_stream = None
+        if self.output_stream:
+            self.output_stream.stop()
+            self.output_stream.close()
+            self.output_stream = None
 
     def queue_audio_for_playback(self, audio_data: np.ndarray):
-        """Enqueue audio data for the callback to play."""
         self.output_buffer.put(audio_data)
 
 class AgentOrchestrator:
@@ -309,6 +407,9 @@ class AgentOrchestrator:
         
         # TTS Queue for Streaming
         self.tts_queue = asyncio.Queue()
+        
+        # Resampler for TTS (24k -> 48k)
+        self.output_resampler = StreamingResampler(TTS_RATE, HW_OUTPUT_RATE)
         
         # Gatekeeper
         self._init_gatekeeper()
@@ -372,12 +473,37 @@ class AgentOrchestrator:
         base_uri = CHATTERBOX_URI.rsplit('/', 1)[0]
         health_uri = f"{base_uri}/health"
         
-        logger.info(f"Waiting for TTS Service at {health_uri}...")
+        rate_set = False
+        logger.info(f"Waiting for TTS Service at {base_uri}...")
         for i in range(20): # Wait up to 30s
             try:
+                # 1. Check Health
                 with urllib.request.urlopen(health_uri) as response:
                     if response.status == 200:
-                        logger.info("TTS Service is ready.")
+                        logger.info("TTS Service is healthy.")
+                        
+                        # 2. Handshake for Config (New Protocol)
+                        try:
+                            info_uri = f"{base_uri}/info"
+                            with urllib.request.urlopen(info_uri) as info_resp:
+                                if info_resp.status == 200:
+                                    import json
+                                    info = json.loads(info_resp.read())
+                                    detected_rate = info.get("sample_rate")
+                                    if detected_rate:
+                                        global TTS_RATE
+                                        if TTS_RATE != detected_rate:
+                                            logger.info(f"🔄 Handshake: Updating TTS_RATE from {TTS_RATE} -> {detected_rate} Hz")
+                                            TTS_RATE = int(detected_rate)
+                                            # Update resampler if it already exists?
+                                            # It is created in __init__ using TTS_RATE. 
+                                            # We are in run(), so __init__ is done.
+                                            # We MUST re-init the resampler!
+                                            self.output_resampler = StreamingResampler(TTS_RATE, HW_OUTPUT_RATE)
+                                    rate_set = True
+                        except Exception as e:
+                            logger.warning(f"TTS Handshake failed (using default {TTS_RATE}): {e}")
+                        
                         return
             except Exception:
                 pass
@@ -405,7 +531,10 @@ class AgentOrchestrator:
         def audio_generator():
             silence_frames = 0
             is_speech_active = False
-            frames_to_silence = SILENCE_DURATION_MS // (CHUNK_SIZE / SAMPLE_RATE * 1000)
+        def audio_generator():
+            silence_frames = 0
+            is_speech_active = False
+            frames_to_silence = SILENCE_DURATION_MS // (INPUT_CHUNK_SIZE / HW_INPUT_RATE * 1000)
             
             while self.state.running:
                 try:
@@ -498,15 +627,21 @@ class AgentOrchestrator:
              payload = {"text": text, "tags": tags}
              async with session.post(CHATTERBOX_URI, json=payload) as resp:
                 if resp.status == 200:
-                    data = await resp.read()
-                    network_latency = time.perf_counter() - start_time
-                    logger.info(f"TTS Network/Generation Latency: {network_latency:.3f}s")
+                    # Stream the response
+                    first_chunk = True
+                    loop = asyncio.get_running_loop()
                     
-                    # Check interruption again before playing
-                    if not self.state.interrupt_event.is_set():
-                         # Run in executor to avoid blocking loop with scipy/audio ops
-                         loop = asyncio.get_running_loop()
-                         await loop.run_in_executor(None, self._submit_audio_to_stream, data)
+                    async for chunk in resp.content.iter_chunked(4096):
+                        if self.state.interrupt_event.is_set(): break
+                        
+                        if first_chunk:
+                            ttft = time.perf_counter() - start_time
+                            logger.info(f"TTS TTFT (First Audio Chunk): {ttft:.3f}s")
+                            first_chunk = False
+                            
+                        # Submit each chunk to the resampler/queue
+                        await loop.run_in_executor(None, self._submit_audio_to_stream, chunk)
+                        
                 else:
                     logger.error(f"TTS Error {resp.status}: {await resp.text()}")
         except Exception as e:
@@ -873,19 +1008,15 @@ class AgentOrchestrator:
             logger.error(f"Failed to enqueue TTS: {e}")
 
     def _submit_audio_to_stream(self, audio_bytes):
-        import scipy.signal
         if self.state.interrupt_event.is_set(): return
         
         try:
             data = np.frombuffer(audio_bytes, dtype=np.int16)
-            # Resample 24k -> 16k
-            # If input is 24k, we need to resample.
-            # Chatterbox is 24k. Stream is 16k.
-            num = int(len(data) * SAMPLE_RATE / 24000)
-            data = scipy.signal.resample(data, num).astype(np.int16)
+            # Upsample 24k -> 48k for Hardware Output
+            data_resampled = self.output_resampler.resample(data)
             
             # Queue for callback
-            self.audio.queue_audio_for_playback(data)
+            self.audio.queue_audio_for_playback(data_resampled)
                 
         except Exception as e:
             logger.error(f"Audio Submission Error: {e}")

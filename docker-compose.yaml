@@ -37,11 +37,13 @@ services:
     runtime: nvidia
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      #- VOICE_REF_FILE=quint-processed.wav
+      - VOICE_REF_FILE=quint-processed.wav
       #- VOICE_REF_FILE=ahab-life-amid-mild-seas.wav
-      - VOICE_REF_FILE=jerry_seinfeld_prompt.wav
+      #- VOICE_REF_FILE=jerry_seinfeld_prompt.wav
+      #- VOICE_REF_FILE=juan-soto-optimized.wav
     volumes:
       - ./config:/app/config
+      - ./src/voice:/app/src/voice
     ports:
       - "8003:8000"
     networks:
@@ -89,7 +91,8 @@ services:
       test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 20
+      start_period: 180s
     depends_on:
       dispatcher-service:
         condition: service_healthy
@@ -126,7 +129,8 @@ services:
       test: ["CMD-SHELL", "curl -f http://localhost:8002/health || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 60s
 
   # 5. Cortex Service (L3): AllenAI Olmo-3-7B-Think (Reasoning)
   cortex-service:
@@ -166,7 +170,8 @@ services:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 20
+      start_period: 180s
 
 networks:
   agent-net:

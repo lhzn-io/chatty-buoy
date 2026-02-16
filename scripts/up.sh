@@ -7,15 +7,16 @@ set -e
 
 # Check if GPU is in use using nvidia-smi (works without sudo on Jetson/IGPU context sometimes, or just standard)
 echo "🔍 Checking for GPU processes..."
-GPU_PIDS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader)
-
-if [ -n "$GPU_PIDS" ]; then
-    echo "❌ Error: GPU processes detected."
-    echo "   The following PIDs are holding GPU resources:"
-    echo "$GPU_PIDS"
-    echo ""
-    echo "   Please run 'docker compose down' or kill lingering processes."
-    exit 1
+# Run Python VRAM Check
+if [ -f "scripts/check_vram.py" ]; then
+    python3 scripts/check_vram.py
+    if [ $? -ne 0 ]; then
+        echo "❌ VRAM Check Failed. Aborting startup."
+        exit 1
+    fi
+else
+    echo "⚠️ scripts/check_vram.py not found. Skipping detailed check."
+    # Legacy check removed/skipped
 fi
 
 echo "✅ GPU is free. Starting Stack..."

@@ -117,5 +117,40 @@ async def generate_audio(req: GenerateRequest):
 def health():
     return {"status": "ok", "model_loaded": model is not None, "conds_loaded": conds is not None}
 
+@app.get("/info")
+def info():
+    """Handshake endpoint to expose audio configuration."""
+    # 1. Start with Model Config fallback
+    rate = 24000 
+    if model:
+        if hasattr(model, 'config') and hasattr(model.config, 'sample_rate'):
+            rate = model.config.sample_rate
+        elif hasattr(model, 'fs'):
+            rate = model.fs
+            
+    # 2. Inspect Reference File (INFO ONLY)
+    # The output rate is determined by the model config (usually 24k), 
+    # NOT the reference file (which is resampled internally).
+    ref_file_rate = None
+    try:
+        import wave
+        if os.path.exists(REFERENCE_PATH):
+            with wave.open(REFERENCE_PATH, 'rb') as f:
+                ref_file_rate = f.getframerate()
+                # logger.info(f"Detected Reference Rate: {ref_file_rate} Hz")
+    except Exception:
+        pass
+    
+    # CRITICAL FIX: Always return the MODEL'S native rate for playback.
+    # Attempting to match the ref file rate caused "Chipmunk" (2x speed) issues
+    # because the model outputs 24k regardless of input.
+    return {
+        "sample_rate": rate, # This comes from model.config (24000)
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "audio_backend": "soundfile",
+        "ref_file": VOICE_REF_FILENAME,
+        "ref_file_rate": ref_file_rate
+    }
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
