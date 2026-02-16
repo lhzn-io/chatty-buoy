@@ -195,6 +195,8 @@ class SileroVAD:
         self._context = x[:, -64:]
         return out[0][0]
 
+class StreamingResampler:
+    """Stateful Resampler using simple linear interpolation (NumPy)."""
     def __init__(self, target_rate=24000, output_rate=48000):
         self.target_rate = target_rate
         self.output_rate = output_rate
