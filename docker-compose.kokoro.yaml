@@ -1,10 +1,8 @@
 services:
   # Optional Kokoro Service (Fallback)
-  # Run with: docker compose -f docker-compose.yaml -f docker-compose.kokoro.yaml up -d
+  # Run with: docker compose -f docker-compose.kokoro.yaml -f docker-compose.kokoro.yaml up -d
   kokoro-service:
-    build:
-      context: .
-      dockerfile: src/voice/Dockerfile.kokoro
+    image: ghcr.io/remsky/kokoro-fastapi-gpu:latest
     container_name: kokoro-service
     runtime: nvidia
     environment:
