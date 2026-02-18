@@ -33,8 +33,8 @@ RUN pip3 install --no-cache-dir \
 # 5. Kokoro Source & Dependencies
 WORKDIR /app
 
-# Copy cloned repo
-COPY src/voice/Kokoro-FastAPI /app
+# Clone repo at build time (Fall-back support without submodule)
+RUN git clone https://github.com/remsky/Kokoro-FastAPI /app
 
 # Install Python Deps (Manual list to avoid Torch conflict)
 RUN pip3 install --no-cache-dir \

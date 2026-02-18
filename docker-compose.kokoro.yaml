@@ -1,0 +1,22 @@
+services:
+  # Optional Kokoro Service (Fallback)
+  # Run with: docker compose -f docker-compose.yaml -f docker-compose.kokoro.yaml up -d
+  kokoro-service:
+    build:
+      context: .
+      dockerfile: src/voice/Dockerfile.kokoro
+    container_name: kokoro-service
+    runtime: nvidia
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      - "8880:8880"
+    networks:
+      - agent-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

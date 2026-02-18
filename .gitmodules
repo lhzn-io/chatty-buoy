@@ -1,3 +1,0 @@
-[submodule "src/voice/Kokoro-FastAPI"]
-	path = src/voice/Kokoro-FastAPI
-	url = https://github.com/remsky/Kokoro-FastAPI

@@ -52,8 +52,7 @@ The agent uses a tiered cognitive architecture:
 - **Output:** 24kHz PCM Audio.
 - **Hardware:** GPU 0 (Thor).
 
-> **Note (Fallback):** The lightweight **Kokoro-82M** model is preserved in `src/voice/Kokoro-FastAPI` as a fallback option for extremely constrained environments or CPU-only deployment.
-*   **Component**: `src/orchestrator/agent_orchestrator.py`
+> **Note (Fallback):** The lightweight **Kokoro-82M** model is supported as a fallback option via `docker-compose.kokoro.yaml`. It clones the repo at build time rather than using a submodule.
 *   **Role**: 
     *   Manages Audio streams (SoundDevice + VAD).
     *   **Async Fork**: Sends user text to L1 and L2 simultaneously.
