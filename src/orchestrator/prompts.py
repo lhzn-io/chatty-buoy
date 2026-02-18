@@ -50,3 +50,10 @@ L3_PLANNER_SYSTEM_PROMPT = (
     "Available Tools:\n"
     "{all_tools_prompt}"
 )
+
+# Fast Path Configuration
+# These are keywords that, if present in the user's spoken text, will bypass the 
+# Semantic Router and trigger the 'engage' route immediately.
+FAST_PATH_HOTWORDS = [
+    "quint", "captain", "status", "system", "report", "hello", "hi ", "hey "
+]

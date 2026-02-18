@@ -37,6 +37,7 @@ services:
     runtime: nvidia
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
       - VOICE_REF_FILE=quint-processed.wav
       #- VOICE_REF_FILE=ahab-life-amid-mild-seas.wav
       #- VOICE_REF_FILE=jerry_seinfeld_prompt.wav

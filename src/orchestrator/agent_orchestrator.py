@@ -39,7 +39,9 @@ from .prompts import (
     L2_SUFFIX_PROMPT,
     L3_CORTEX_SYSTEM_PROMPT,
     L3_CORTEX_USER_TEMPLATE,
-    L3_PLANNER_SYSTEM_PROMPT
+    L3_CORTEX_USER_TEMPLATE,
+    L3_PLANNER_SYSTEM_PROMPT,
+    FAST_PATH_HOTWORDS
 )
 
 # --- Configuration ---
@@ -409,6 +411,7 @@ class AgentOrchestrator:
         
         # TTS Queue for Streaming
         self.tts_queue = asyncio.Queue()
+        self.tts_lock = asyncio.Lock() # Serializes audio playback while allowing concurrent generation
         
         # Resampler for TTS (24k -> 48k)
         self.output_resampler = StreamingResampler(TTS_RATE, HW_OUTPUT_RATE)
@@ -516,6 +519,7 @@ class AgentOrchestrator:
         logger.info("Starting Async Cascade Orchestrator...")
         self._wait_for_riva()
         self._wait_for_tts()
+        
         self.audio.start()
         
         # Audio Thread
@@ -609,8 +613,9 @@ class AgentOrchestrator:
                     self.tts_queue.task_done()
                     continue
                     
-                # Process TTS (Blocking call to API, but decoupled from L1)
-                await self._execute_tts_request(session, text)
+                # Process TTS (Concurrent Request, Serialized Playback)
+                # We launch the request immediately. It will block locally on tts_lock when ready to play.
+                self._create_bg_task(self._execute_tts_request(session, text))
                 self.tts_queue.task_done()
                 
         except asyncio.CancelledError:
@@ -629,20 +634,24 @@ class AgentOrchestrator:
              payload = {"text": text, "tags": tags}
              async with session.post(CHATTERBOX_URI, json=payload) as resp:
                 if resp.status == 200:
-                    # Stream the response
-                    first_chunk = True
-                    loop = asyncio.get_running_loop()
-                    
-                    async for chunk in resp.content.iter_chunked(4096):
-                        if self.state.interrupt_event.is_set(): break
+                    # Wait for turn to speak (Serialize Audio)
+                    async with self.tts_lock:
+                        if self.state.interrupt_event.is_set(): return
+
+                        # Stream the response
+                        first_chunk = True
+                        loop = asyncio.get_running_loop()
                         
-                        if first_chunk:
-                            ttft = time.perf_counter() - start_time
-                            logger.info(f"TTS TTFT (First Audio Chunk): {ttft:.3f}s")
-                            first_chunk = False
+                        async for chunk in resp.content.iter_chunked(4096):
+                            if self.state.interrupt_event.is_set(): break
                             
-                        # Submit each chunk to the resampler/queue
-                        await loop.run_in_executor(None, self._submit_audio_to_stream, chunk)
+                            if first_chunk:
+                                ttft = time.perf_counter() - start_time
+                                logger.info(f"TTS TTFT (First Audio Chunk): {ttft:.3f}s")
+                                first_chunk = False
+                                
+                            # Submit each chunk to the resampler/queue
+                            await loop.run_in_executor(None, self._submit_audio_to_stream, chunk)
                         
                 else:
                     logger.error(f"TTS Error {resp.status}: {await resp.text()}")
@@ -656,6 +665,9 @@ class AgentOrchestrator:
                 # Start TTS Worker
                 tts_worker = self._create_bg_task(self._tts_loop())
                 
+                # L1 Warmup (Silent)
+                self._create_bg_task(self._warmup_l1())
+                
                 await self._speak(session, greeting)
                 
                 while self.state.running:
@@ -667,9 +679,23 @@ class AgentOrchestrator:
 
                     if not text.strip(): continue
                     logger.info(f"Resolving Intent for: '{text}'")
+                    router_start = time.perf_counter()
                     
-                    # Gatekeeper
-                    route = self.router(text)
+                    
+                    # FAST PATH: Bypass Router for common keywords
+                    text_lower = text.lower()
+                    if any(x in text_lower for x in FAST_PATH_HOTWORDS):
+                        logger.info("⚡ Fast Path Triggered")
+                        # Mock a route object
+                        from collections import namedtuple
+                        MockRoute = namedtuple("Route", ["name"])
+                        route = MockRoute(name="engage")
+                    else:
+                        # Gatekeeper (Async Execution)
+                        # Offload to executor to prevent blocking
+                        loop = asyncio.get_running_loop()
+                        route = await loop.run_in_executor(None, self.router, text)
+                        logger.info(f"Router Latency: {time.perf_counter() - router_start:.3f}s")
                     if route.name == "ignore":
                         logger.info("Gatekeeper: Ignored.")
                         continue
@@ -751,7 +777,7 @@ class AgentOrchestrator:
         first_token_time = None
         
         try:
-            async with session.post(L1_URI, json={"model": L1_MODEL, "messages": messages, "stream": True, "max_tokens": 150}) as resp:
+            async with session.post(L1_URI, json={"model": L1_MODEL, "messages": messages, "stream": True, "max_tokens": 150, "temperature": 0.6, "top_p": 0.9, "repetition_penalty": 1.15}) as resp:
                 async for line in resp.content:
                     if self.state.interrupt_event.is_set(): break
                     
@@ -765,9 +791,9 @@ class AgentOrchestrator:
                         full_resp += delta
                         current_sent += delta
                         
-                        # TTS Chunking: Split on sentence endings + space/newline, but ensure buffer is long enough
-                        # to avoid splitting abbreviations. Reduced to > 4 for responsiveness (e.g. "Okay.", "Yes.")
-                        if len(current_sent) > 4 and any(p in current_sent for p in ".?!"):
+                        # TTS Chunking: Split on sentence endings + space/newline.
+                        # Optimized for latency: allow short acknowledgments (e.g. "Ok.") to fire immediately.
+                        if len(current_sent) > 2 and any(p in current_sent for p in ".?!"):
                              # Find the last valid punctuation that is followed by space or is end of string
                              # Avoid splitting on "Capt.", "Mr.", etc? For now, risk it for speed.
                              match = re.search(r'([.?!])(\s+|$)', current_sent)
@@ -792,6 +818,28 @@ class AgentOrchestrator:
 
         except Exception as e:
             logger.error(f"L1 Error: {e}")
+
+    async def _warmup_l1(self):
+        """Silently burn-in the L1 model to load weights/caches."""
+        logger.info("🔥 Component Warmup Initiated (L1 + Router)...")
+        start = time.perf_counter()
+        async with aiohttp.ClientSession() as session:
+            # 1. Warmup L1 - Send 3 empty requests
+            warmup_msg = [{"role": "user", "content": "ignore this"}]
+            for i in range(3):
+                try:
+                    async with session.post(L1_URI, json={"model": L1_MODEL, "messages": warmup_msg, "max_tokens": 10}) as resp:
+                        await resp.read()
+                except Exception as e:
+                     logger.warning(f"Warmup L1 failed iter {i}: {e}")
+            
+            # 2. Warmup Router (Force load)
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.router, "warmup")
+            except Exception: pass
+            
+        logger.info(f"🔥 Warmup Complete in {time.perf_counter() - start:.3f}s")
 
     async def _summarize_history(self, history_chunk):
         """Background task to summarize old conversation turns."""
@@ -829,7 +877,7 @@ class AgentOrchestrator:
         messages = [{"role": "user", "content": prompt}]
         
         try:
-            async with session.post(L2_URI, json={"model": L2_MODEL, "messages": messages, "stream": False, "max_tokens": 100}) as resp:
+            async with session.post(L2_URI, json={"model": L2_MODEL, "messages": messages, "stream": False, "max_tokens": 100, "temperature": 0.0}) as resp:
                 if resp.status != 200: return
                 data = await resp.json()
                 content = data['choices'][0]['message']['content']

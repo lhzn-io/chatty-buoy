@@ -37,7 +37,13 @@ async def load_model():
     global model, conds
     logger.info("Loading Chatterbox-Turbo...")
     try:
-        from chatterbox import ChatterboxTTS
+        # Optimistic Import: Try Turbo First
+        try:
+            from chatterbox.tts_turbo import ChatterboxTurboTTS as ChatterboxTTS
+            logger.info("🚀 HIGH PERFORMANCE MODE: Using ChatterboxTurboTTS")
+        except ImportError:
+            from chatterbox import ChatterboxTTS
+            logger.warning("⚠️ STANDARD MODE: Using standard ChatterboxTTS (Turbo not found)")
         
         # Load Model
         logger.info("Loading Model...")
@@ -87,14 +93,31 @@ async def generate_audio(req: GenerateRequest):
     logger.info(f"Generating: '{text}'")
 
     try:
-        # Generate
-        # model.generate returns audio_tensor (1, T) usually
-        # Using cached conds
-        if conds is not None:
-            audio = model.generate(text, conditionals=conds)
+        # Detect if we are using Turbo (which manages conds internally) or Standard
+        import inspect
+        sig = inspect.signature(model.generate)
+        
+        if "conditionals" in sig.parameters:
+            # Standard Path
+            if conds is not None:
+                audio = model.generate(text, conditionals=conds)
+            else:
+                audio = model.generate(text, audio_prompt_path=REFERENCE_PATH if os.path.exists(REFERENCE_PATH) else None)
         else:
-             # Fallback if no ref provided (might look for default or fail)
-            audio = model.generate(text, audio_prompt_path=REFERENCE_PATH if os.path.exists(REFERENCE_PATH) else None)
+             # Turbo Path (Implicit state)
+             # self.conds is already set in load_model->prepare_conditionals
+             if not model.conds and conds:
+                  # Edge case: if we cached 'conds' globally but model lost it? 
+                  # TurboTTS doesn't allow passing conds, so we must rely on state.
+                  # But load_model called prepare_conditionals which sets self.conds.
+                  pass
+             
+             if not model.conds:
+                  # Emergency Fallback
+                  if os.path.exists(REFERENCE_PATH):
+                       model.prepare_conditionals(REFERENCE_PATH)
+             
+             audio = model.generate(text)
             
         # Convert to PCM 16-bit
         # Expected native rate is 24kHz
