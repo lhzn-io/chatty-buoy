@@ -18,6 +18,7 @@ dependencies:
   - gst-python
   - pip:
       - torchvision
+      - redis
       - nvidia-cudss-cu13
       - nvpl-blas
       - nvpl-lapack
@@ -30,4 +31,3 @@ dependencies:
       - openai
       - semantic-router
       - transformers
-      - -e vendor/personaplex/moshi

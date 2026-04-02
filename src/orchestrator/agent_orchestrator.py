@@ -22,6 +22,8 @@ import queue
 import threading
 from typing import Optional, List, Dict, Any
 
+import redis.asyncio as redis
+
 import aiohttp
 import numpy as np
 import onnxruntime
@@ -65,6 +67,11 @@ L3_MODEL = "allenai/Olmo-3-7B-Think"
 
 # TTS (Chatterbox-Turbo)
 CHATTERBOX_URI = "http://localhost:8003/generate"
+
+# Redis Config
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+VISION_STREAM_KEY = "vision_events"
 
 # Audio Config
 # Audio Config
@@ -115,6 +122,7 @@ class SharedState:
         self.output_device_idx = None
         self.history = []  # Short-term memory buffer [(role, content)]
         self.summary = ""  # Medium-term summarized memory
+        self.visual_context = "No visual contacts." # Vision State
 
     @property
     def is_agent_speaking(self):
@@ -435,6 +443,9 @@ class AgentOrchestrator:
             interim_results=True,
         )
 
+        # Redis Client
+        self.redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
     def _init_gatekeeper(self):
         logger.info(f"Initializing Gatekeeper for {CHARACTER_NAME}...")
         encoder = HuggingFaceEncoder(name="Snowflake/snowflake-arctic-embed-xs")
@@ -667,6 +678,9 @@ class AgentOrchestrator:
                 
                 # L1 Warmup (Silent)
                 self._create_bg_task(self._warmup_l1())
+
+                # Vision Monitor
+                self._create_bg_task(self._monitor_vision_stream())
                 
                 await self._speak(session, greeting)
                 
@@ -715,9 +729,14 @@ class AgentOrchestrator:
                     self.state.interrupt_event.clear()
                     
                     # SYSTEM STATS INJECTION (Fast Path)
-                    system_context = ""
+                    parts = []
                     if "status" in text.lower():
-                        system_context = f"[SYSTEM]: {self.sys_tools.get_report()}"
+                        parts.append(f"[SYSTEM STATUS]: {self.sys_tools.get_report()}")
+                    
+                    if self.state.visual_context:
+                        parts.append(f"[VISUAL SENSORS]: {self.state.visual_context}")
+                    
+                    system_context = "\n".join(parts)
 
                     # ASYNC FORK
                     # 1. L1 Front-End (Immediate Chat)
@@ -737,6 +756,51 @@ class AgentOrchestrator:
                     await asyncio.gather(*self.bg_tasks, return_exceptions=True)
 
                 
+                    await l1_task
+                    
+    async def _monitor_vision_stream(self):
+        """Consumes vision events from Redis and triggers alerts."""
+        logger.info(f"Connecting to Redis Stream: {VISION_STREAM_KEY}")
+        last_id = "$" # Only new messages
+        
+        while self.state.running:
+            try:
+                # Block for 100ms
+                response = await self.redis.xread({VISION_STREAM_KEY: last_id}, count=1, block=100)
+                if not response:
+                    continue
+                    
+                for stream, messages in response:
+                    for message_id, data in messages:
+                        last_id = message_id
+                        
+                        # Parse Event
+                        obj_class = data.get("class", "object")
+                        bearing = float(data.get("bearing", 0))
+                        rng = float(data.get("range", 1000))
+                        heading = float(data.get("heading_rel", 0))
+                        
+                        # 1. Update Context
+                        self.state.visual_context = f"CONTACT: {obj_class} at {bearing} deg, {rng}m."
+                        
+                        # 2. Reflex Trigger
+                        if rng < 20 and obj_class in ['boat', 'ship']:
+                            logger.warning(f"!!! COLLISION ALERT: {obj_class} @ {rng}m !!!")
+                            
+                            # Pause current speech
+                            self.state.signal_interruption()
+                            
+                            # Inject Alert (High Priority)
+                            alert_msg = f"System Alert: Collision Warning! {obj_class} at {bearing} degrees, {rng} meters."
+                            self.text_queue.put(alert_msg)
+                            
+            except redis.ConnectionError:
+                logger.warning("Redis Connection Lost. Retrying...")
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"Vision Monitor Error: {e}")
+                await asyncio.sleep(1)
+
     async def _run_l1_frontend(self, session, text, system_context=""):
         """L1: Chat Personality with Memory & Summarization."""
         start_time = time.perf_counter()

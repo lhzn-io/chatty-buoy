@@ -17,6 +17,7 @@ For a detailed breakdown of the system capabilities, service orchestration, and 
 ### 1. Requirements
 *   NVIDIA Jetson AGX Thor (JetPack 7.0+)
 *   Docker & NVIDIA Container Runtime
+*   **References**: [Ultralytics NVIDIA Jetson Guide](https://docs.ultralytics.com/guides/nvidia-jetson/)
 *   `micromamba` (Environment: `chatty-buoy`)
 *   **Optional**: `ngc` CLI (Install manually if you need to download new Riva models).
     > [Install NGC CLI](https://org.ngc.nvidia.com/setup/installers/cli)

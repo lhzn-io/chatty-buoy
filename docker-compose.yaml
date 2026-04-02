@@ -38,9 +38,9 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-      - VOICE_REF_FILE=quint-processed.wav
+      #- VOICE_REF_FILE=quint-processed.wav
       #- VOICE_REF_FILE=ahab-life-amid-mild-seas.wav
-      #- VOICE_REF_FILE=jerry_seinfeld_prompt.wav
+      - VOICE_REF_FILE=jerry_seinfeld_prompt.wav
       #- VOICE_REF_FILE=juan-soto-optimized.wav
     volumes:
       - ./config:/app/config
@@ -173,6 +173,85 @@ services:
       timeout: 5s
       retries: 20
       start_period: 180s
+
+  # 6. Vision Service (Phase 3.1)
+  vision-service:
+    container_name: vision-service
+    build:
+      context: .
+      dockerfile: src/vision/Dockerfile.vision
+    image: chatty-buoy/vision:latest
+    runtime: nvidia
+    restart: always
+    shm_size: '2gb'
+    ports:
+      - "8556:8556"
+    environment:
+      # --- Camera Source Configuration ---
+      # Option 1: Local Video File (Kitchen Verification - Disabled)
+      # - RTSP_URL=file:///app/data/videos/kitchen_noaudio.mp4
+      # Option 2: Live YouTube RTSP Simulator (Rotterdam Shipspotting)
+      - RTSP_URL=rtsp://mediamtx:8554/live
+      # Option 3: Physical IP Camera
+      #- RTSP_URL=${RTSP_URL:-rtsp://192.168.3.243:8080/video}
+      - REDIS_HOST=redis
+      - VISION_MODE=${VISION_MODE:-marine}
+    volumes:
+      - ./models/vision:/root/.config/Ultralytics
+      - ./models/vision:/app/models
+      - ./data/videos:/app/data/videos # For Local file testing
+    networks:
+      - agent-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # 7. Redis for Event Bus
+  redis:
+    image: redis:alpine
+    container_name: redis
+    restart: always
+    ports:
+      - "6379:6379"
+    networks:
+      - agent-net
+
+  # 8. MediaMTX (RTSP Server for Live YouTube Simulation & WebRTC Proxy)
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx
+    restart: always
+    environment:
+      # Force MediaMTX to advertise the host IP for WebRTC ICE negotiation instead of the internal docker IP
+      - MTX_WEBRTCADDITIONALHOSTS=localhost,karone
+    ports:
+      - "8554:8554"
+      - "1935:1935" # RTMP
+      - "8888:8888" # HLS
+      - "8889:8889" # WebRTC HTTP
+      - "8189:8189/udp" # WebRTC ICE / UDP Stream
+      - "9997:9997" # API
+    networks:
+      - agent-net
+
+  # 9. RTSP Simulator (Live YouTube Restreamer)
+  rtsp-simulator:
+    build:
+      context: .
+      dockerfile: src/rtsp_simulator/Dockerfile.rtsp
+    container_name: rtsp-simulator
+    restart: always
+    environment:
+      - YOUTUBE_URL=https://www.youtube.com/watch?v=pBXTZ2rUO3w
+      - RTSP_OUT=rtsp://mediamtx:8554/live
+    networks:
+      - agent-net
+    ports:
+      - "5001:5000"
 
 networks:
   agent-net:

@@ -1,0 +1,13 @@
+FROM alpine:latest
+
+RUN apk add --no-cache ffmpeg python3 py3-pip nodejs && \
+    wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp && \
+    pip3 install --break-system-packages flask
+
+COPY src/rtsp_simulator/restream.sh /app/restream.sh
+COPY src/rtsp_simulator/simulator_ui.py /app/simulator_ui.py
+RUN chmod +x /app/restream.sh
+
+# Run the UI in the background and the restreamer in the foreground
+ENTRYPOINT ["/bin/sh", "-c", "python3 /app/simulator_ui.py & /app/restream.sh"]

@@ -40,7 +40,19 @@ The agent uses a tiered cognitive architecture:
 *   **Model**: `allenai/Olmo-3-7B-Think` OR `nvidia/Nemotron-3-30B`
 *   **Role**: Strategic Planning, RAG, Complex Analysis, Output Formulation.
 
-### 3. Voice Synthesis (TTS) - "The Voice"
+### 3. Vision (Sight) - "The Watchstander"
+*   **Service**: `vision-service`
+*   **Models**: 
+    *   **Spotter**: `YOLO-26N` (Nano) - Optimized for DLA/Edge efficiency.
+    *   **Navigator**: `YOLO-11S-OBB` (Oriented Bounding Box) - For precise heading/aspect analysis.
+*   **Role**: 
+    *   **Spotter**: High-FPS anomaly detection (Kitchen/Marine modes).
+    *   **Navigator**: Triggered analysis for calculating bearing, range, and collision risk.
+*   **Reference**: 
+    *   [Ultralytics NVIDIA Jetson Guide](https://docs.ultralytics.com/guides/nvidia-jetson/)
+    *   [YOLO-26N Paper](https://arxiv.org/abs/2509.25164)
+
+### 4. Voice Synthesis (TTS) - "The Voice"
 **Engine:** Chatterbox-Turbo (350M)
 **Why:**
 - **Expressivity:** Native support for paralinguistic tags (`[laughter]`, `[sighs]`, `[breaths]`).
