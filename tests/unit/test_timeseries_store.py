@@ -19,7 +19,7 @@ def sample_frames():
     """Create sample detection frames."""
     bbox = BoundingBox(x1=0.0, y1=0.0, x2=1.0, y2=1.0)
     frames = []
-    for i in range(5):
+    for i in range(1, 6):
         det = Detection(class_name="person", confidence=0.9, bbox=bbox)
         frame = DetectionFrame(
             timestamp=float(i),
@@ -71,14 +71,14 @@ class TestInMemoryStore:
         memory_store.add_frames(sample_frames)
         frames = memory_store.get_latest(2)
         assert len(frames) == 2
-        assert frames[-1].timestamp == 4.0
+        assert frames[-1].timestamp == 5.0
     
     def test_get_since(self, memory_store, sample_frames):
         """Test getting frames after timestamp."""
         memory_store.add_frames(sample_frames)
-        frames = memory_store.get_since(2.0)
+        frames = memory_store.get_since(3.0)
         assert len(frames) == 2
-        assert frames[0].timestamp == 3.0
+        assert frames[0].timestamp == 4.0
     
     def test_clear(self, memory_store, sample_frames):
         """Test clearing store."""
@@ -93,7 +93,7 @@ class TestInMemoryStore:
         store.add_frames(sample_frames)
         assert store.count() == 3
         # Should keep last 3
-        assert store.frames[-1].timestamp == 4.0
+        assert store.frames[-1].timestamp == 5.0
     
     def test_get_time_range_empty(self, memory_store):
         """Test get_time_range on empty store."""
@@ -103,8 +103,8 @@ class TestInMemoryStore:
         """Test get_time_range."""
         memory_store.add_frames(sample_frames)
         min_ts, max_ts = memory_store.get_time_range()
-        assert min_ts == 0.0
-        assert max_ts == 4.0
+        assert min_ts == 1.0
+        assert max_ts == 5.0
 
 
 class TestSQLiteStore:
@@ -133,14 +133,14 @@ class TestSQLiteStore:
         sqlite_store.add_frames(sample_frames)
         frames = sqlite_store.get_latest(2)
         assert len(frames) == 2
-        assert frames[-1].timestamp == 4.0
+        assert frames[-1].timestamp == 5.0
     
     def test_get_since(self, sqlite_store, sample_frames):
         """Test getting frames after timestamp."""
         sqlite_store.add_frames(sample_frames)
-        frames = sqlite_store.get_since(2.0)
+        frames = sqlite_store.get_since(3.0)
         assert len(frames) == 2
-        assert frames[0].timestamp == 3.0
+        assert frames[0].timestamp == 4.0
     
     def test_clear(self, sqlite_store, sample_frames):
         """Test clearing store."""
@@ -170,8 +170,8 @@ class TestSQLiteStore:
         """Test get_time_range."""
         sqlite_store.add_frames(sample_frames)
         min_ts, max_ts = sqlite_store.get_time_range()
-        assert min_ts == 0.0
-        assert max_ts == 4.0
+        assert min_ts == 1.0
+        assert max_ts == 5.0
     
     def test_duplicate_timestamp_handled(self, sqlite_store, sample_frames):
         """Test that duplicate timestamps are handled (INSERT OR REPLACE)."""

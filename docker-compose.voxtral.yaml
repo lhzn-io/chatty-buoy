@@ -1,0 +1,46 @@
+services:
+  voxtral-service:
+    build:
+      context: .
+      dockerfile: docker/voxtral/Dockerfile.voxtral
+    container_name: voxtral-service
+    runtime: nvidia
+    ipc: host
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_HUB_ENABLE_HF_TRANSFER=0
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    volumes:
+      - /home/lhzn/.cache/huggingface:/root/.cache/huggingface
+    # Standard entrypoint now that we've injected into the system vllm
+    entrypoint: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+    command: >
+      --model mistralai/Voxtral-4B-TTS-2603 
+      --omni
+      --trust-remote-code
+      --quantization fp8 
+      --dtype bfloat16 
+      --enforce-eager
+      --gpu-memory-utilization 0.5 
+      --max-model-len 4096
+      --host 0.0.0.0
+      --port 8000
+    ports:
+      - "8004:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 300s
+
+networks:
+  agent-net:
+    external: true

@@ -6,7 +6,7 @@ import logging
 
 # Configuration
 L1_URI = "http://localhost:8001/v1/chat/completions"
-L1_MODEL = "google/gemma-3-4b-it"
+L1_MODEL = "google/gemma-4-E4B-it"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MemoryTest")

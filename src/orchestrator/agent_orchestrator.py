@@ -21,6 +21,9 @@ import time
 import queue
 import threading
 from typing import Optional, List, Dict, Any
+import wave
+import io
+import base64
 
 import redis.asyncio as redis
 
@@ -28,21 +31,14 @@ import aiohttp
 import numpy as np
 import onnxruntime
 import sounddevice as sd
-import riva.client
-from semantic_router import Route, SemanticRouter
-from semantic_router.encoders import HuggingFaceEncoder
 
 from .tool_schema import AVAILABLE_TOOLS, get_tools_prompt
+from src.cortex.client import CortexClient
 
 from .prompts import (
     CHARACTER_NAME,
     L1_SYSTEM_PROMPT,
     SUMMARIZATION_PROMPT, 
-    L2_SUFFIX_PROMPT,
-    L3_CORTEX_SYSTEM_PROMPT,
-    L3_CORTEX_USER_TEMPLATE,
-    L3_CORTEX_USER_TEMPLATE,
-    L3_PLANNER_SYSTEM_PROMPT,
     FAST_PATH_HOTWORDS
 )
 
@@ -50,20 +46,9 @@ from .prompts import (
 MODELS_DIR = "models"
 VAD_MODEL_PATH = os.path.join(MODELS_DIR, "silero_vad.onnx")
 
-# URI Configuration
-RIVA_URI = "localhost:50051"
-
-# L1: Front-End (Gemma-3-4B) - Fast Chat
+# L1: Front-End (Gemma-4-9B) - Main Chat & Tools
 L1_URI = "http://localhost:8001/v1/chat/completions"
-L1_MODEL = "google/gemma-3-4b-it"
-
-# L2: Dispatcher (FunctionGemma-270m) - Tool Router
-L2_URI = "http://localhost:8002/v1/chat/completions"
-L2_MODEL = "google/functiongemma-270m-it"
-
-# L3: Cortex (Nemotron-30B) - Deep Reasoning
-L3_URI = "http://localhost:8000/v1/chat/completions"
-L3_MODEL = "allenai/Olmo-3-7B-Think"
+L1_MODEL = "google/gemma-4-E4B-it"
 
 # TTS (Chatterbox-Turbo)
 CHATTERBOX_URI = "http://localhost:8003/generate"
@@ -123,6 +108,7 @@ class SharedState:
         self.history = []  # Short-term memory buffer [(role, content)]
         self.summary = ""  # Medium-term summarized memory
         self.visual_context = "No visual contacts." # Vision State
+        self.last_speech_time = 0.0
 
     @property
     def is_agent_speaking(self):
@@ -132,6 +118,8 @@ class SharedState:
     @is_agent_speaking.setter
     def is_agent_speaking(self, value):
         with self._speaking_lock:
+            if self._is_speaking and not value:
+                self.last_speech_time = time.perf_counter()
             self._is_speaking = value
             if value:
                 self.interrupt_event.clear()
@@ -175,8 +163,8 @@ class SystemTools:
                         # Power
                         power_cur = jetson.stats.get('Power TOT', 0) / 1000.0 # mW -> W
                         # Temp
-                        temp_gpu = jetson.stats.get('Temp GPU', 0)
-                        temp_cpu = jetson.stats.get('Temp CPU', 0)
+                        temp_gpu = jetson.stats.get('Temp gpu', 0)
+                        temp_cpu = jetson.stats.get('Temp cpu', 0)
                         
                         report += f" | GPU: {gpu}% | Power: {power_cur:.1f}W | Temp(GPU): {temp_gpu}C | Temp(CPU): {temp_cpu}C"
             except Exception as e:
@@ -424,63 +412,9 @@ class AgentOrchestrator:
         # Resampler for TTS (24k -> 48k)
         self.output_resampler = StreamingResampler(TTS_RATE, HW_OUTPUT_RATE)
         
-        # Gatekeeper
-        self._init_gatekeeper()
-        
-        # Riva
-        self.auth = riva.client.Auth(uri=RIVA_URI)
-        self.asr_service = riva.client.ASRService(self.auth)
-        self.asr_config = riva.client.StreamingRecognitionConfig(
-            config=riva.client.RecognitionConfig(
-                encoding=riva.client.AudioEncoding.LINEAR_PCM,
-                language_code="en-US",
-                max_alternatives=1,
-                enable_automatic_punctuation=True,
-                verbatim_transcripts=True,
-                sample_rate_hertz=SAMPLE_RATE,
-                audio_channel_count=1,
-            ),
-            interim_results=True,
-        )
-
         # Redis Client
         self.redis = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-
-    def _init_gatekeeper(self):
-        logger.info(f"Initializing Gatekeeper for {CHARACTER_NAME}...")
-        encoder = HuggingFaceEncoder(name="Snowflake/snowflake-arctic-embed-xs")
-        self.ignore_route = Route(name="ignore", utterances=[
-            "Pass the salt", "Umm...", "formulating sentence", "fingers crossed", "just kidding", "nevermind",
-            "talking to someone else", "ignore this", "background noise"
-        ])
-        
-        engage_utterances = [
-            f"Hey {CHARACTER_NAME}", "Status report", "Is there traffic?", "Help me", "Hello", 
-            "What's the course?", "Depth check", "Any alerts?", "System check", 
-            "Radio check", "Who is that?", "Identify vessel", "navigate to waypoint",
-            "weather forecast", "wind speed", "battery status", "engine temp",
-            f" {CHARACTER_NAME}", f"Yo {CHARACTER_NAME}", "Buoy", "Assistant", "Computer"
-        ]
-        self.engage_route = Route(name="engage", utterances=engage_utterances)
-        self.planning_route = Route(name="planning", utterances=[
-            "Plan a mission", "Create a strategy", "I need a plan", "Mission Control", "Strategize",
-            "Plot a course", "Route planning", "Tactical assessment"
-        ])
-        self.router = SemanticRouter(encoder=encoder, routes=[self.ignore_route, self.engage_route, self.planning_route])
-        # Force index build if using default LocalIndex or if routes are missing
-        if self.router.index is None or (hasattr(self.router.index, "routes") and self.router.index.routes is None):
-             logger.info("Building Semantic Index...")
-             self.router.add([self.ignore_route, self.engage_route, self.planning_route])
-
-    def _wait_for_riva(self):
-        for i in range(10):
-            try:
-                riva.client.ASRService(riva.client.Auth(uri=RIVA_URI))
-                logger.info("Riva is ready.")
-                return
-            except:
-                time.sleep(2)
-        logger.error("Riva not available.")
+        self.cortex_client = CortexClient()
 
     def _wait_for_tts(self):
         import urllib.request
@@ -528,7 +462,6 @@ class AgentOrchestrator:
 
     def run(self):
         logger.info("Starting Async Cascade Orchestrator...")
-        self._wait_for_riva()
         self._wait_for_tts()
         
         self.audio.start()
@@ -544,58 +477,55 @@ class AgentOrchestrator:
             self.audio.stop()
 
     def _audio_loop(self):
-        """Reads mic, runs VAD, sends to Riva ASR."""
-        def audio_generator():
-            silence_frames = 0
-            is_speech_active = False
-        def audio_generator():
-            silence_frames = 0
-            is_speech_active = False
-            frames_to_silence = SILENCE_DURATION_MS // (INPUT_CHUNK_SIZE / HW_INPUT_RATE * 1000)
+        """Reads mic, runs VAD, converts PCM to WAV base64 payload over text_queue."""
+        silence_frames = 0
+        is_speech_active = False
+        frames_to_silence = SILENCE_DURATION_MS // (INPUT_CHUNK_SIZE / HW_INPUT_RATE * 1000)
+        audio_buffer = []
+        
+        while self.state.running:
+            try:
+                chunk = self.audio.input_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
             
-            while self.state.running:
-                try:
-                    chunk = self.audio.input_queue.get(timeout=1.0)
-                except queue.Empty:
-                    continue
-                
-                # VAD
-                audio_f32 = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
-                prob = self.vad.process_chunk(audio_f32)
-                
-                if prob > VAD_THRESHOLD:
-                    if not is_speech_active:
-                        is_speech_active = True
-                        logger.info(">>> VAD: SPEECH <<<")
-                    silence_frames = 0
-                    if self.state.is_agent_speaking:
-                        self.state.signal_interruption()
-                else:
-                    if is_speech_active:
-                        silence_frames += 1
-                        if silence_frames > frames_to_silence:
-                            is_speech_active = False
-                            logger.info(">>> VAD: SILENCE <<<")
-                
-                yield chunk
-
-        try:
-            responses = self.asr_service.streaming_response_generator(
-                audio_chunks=audio_generator(),
-                streaming_config=self.asr_config
-            )
-            for response in responses:
-                if not response.results: continue
-                result = response.results[0]
-                if not result.alternatives: continue
-                transcript = result.alternatives[0].transcript
-                if result.is_final:
-                    logger.info(f"ASR FINAL: '{transcript}'")
-                    self.text_queue.put(transcript)
-        except Exception as e:
-            logger.error(f"ASR Error: {e}")
-
-            logger.error(f"ASR Error: {e}")
+            # VAD
+            audio_f32 = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+            prob = self.vad.process_chunk(audio_f32)
+            
+            if prob > VAD_THRESHOLD:
+                if not is_speech_active:
+                    is_speech_active = True
+                    logger.info(">>> VAD: SPEECH STARTED <<<")
+                    audio_buffer = []  # Clear buffer on new speech
+                silence_frames = 0
+                if self.state.is_agent_speaking:
+                    self.state.signal_interruption()
+            else:
+                if is_speech_active:
+                    silence_frames += 1
+                    if silence_frames > frames_to_silence:
+                        is_speech_active = False
+                        logger.info(">>> VAD: SILENCE (End of Speech) <<<")
+                        if audio_buffer:
+                            # Build WAV file in memory
+                            wav_io = io.BytesIO()
+                            full_pcm = b"".join(audio_buffer)
+                            with wave.open(wav_io, 'wb') as wav_file:
+                                wav_file.setnchannels(1)
+                                wav_file.setsampwidth(2)
+                                wav_file.setframerate(SAMPLE_RATE)
+                                wav_file.writeframes(full_pcm)
+                            
+                            # Base64 Encode
+                            b64_str = base64.b64encode(wav_io.getvalue()).decode("utf-8")
+                            
+                            # Inject into orchestrator as audio type payload
+                            self.text_queue.put({"type": "audio", "data": b64_str})
+                            audio_buffer = []
+            
+            if is_speech_active or (silence_frames <= frames_to_silence and audio_buffer):
+                audio_buffer.append(chunk)
 
     def _create_bg_task(self, coro):
         task = asyncio.create_task(coro)
@@ -639,7 +569,7 @@ class AgentOrchestrator:
         start_time = time.perf_counter()
         # Heuristic Tag Injection
         tags = self._infer_tags(text)
-        logger.info(f"TTS Request: '{text}' [Tags: {tags}]")
+        logger.debug(f"TTS Execution Request: '{text}' [Tags: {tags}]")
         
         try:
              payload = {"text": text, "tags": tags}
@@ -653,8 +583,16 @@ class AgentOrchestrator:
                         first_chunk = True
                         loop = asyncio.get_running_loop()
                         
+                        audio_buffer = bytearray()
                         async for chunk in resp.content.iter_chunked(4096):
                             if self.state.interrupt_event.is_set(): break
+                            
+                            audio_buffer.extend(chunk)
+                            if len(audio_buffer) % 2 != 0:
+                                continue # Wait for the missing byte
+                                
+                            current_chunk = bytes(audio_buffer)
+                            audio_buffer.clear()
                             
                             if first_chunk:
                                 ttft = time.perf_counter() - start_time
@@ -662,7 +600,10 @@ class AgentOrchestrator:
                                 first_chunk = False
                                 
                             # Submit each chunk to the resampler/queue
-                            await loop.run_in_executor(None, self._submit_audio_to_stream, chunk)
+                            await loop.run_in_executor(None, self._submit_audio_to_stream, current_chunk)
+                            
+                        # Clear resampler state boundary for next TTS call
+                        self.output_resampler.last_sample = None
                         
                 else:
                     logger.error(f"TTS Error {resp.status}: {await resp.text()}")
@@ -686,37 +627,20 @@ class AgentOrchestrator:
                 
                 while self.state.running:
                     try:
-                        text = self.text_queue.get_nowait()
+                        item = self.text_queue.get_nowait()
                     except queue.Empty:
                         await asyncio.sleep(0.01)
                         continue
-
-                    if not text.strip(): continue
-                    logger.info(f"Resolving Intent for: '{text}'")
-                    router_start = time.perf_counter()
-                    
-                    
-                    # FAST PATH: Bypass Router for common keywords
-                    text_lower = text.lower()
-                    if any(x in text_lower for x in FAST_PATH_HOTWORDS):
-                        logger.info("⚡ Fast Path Triggered")
-                        # Mock a route object
-                        from collections import namedtuple
-                        MockRoute = namedtuple("Route", ["name"])
-                        route = MockRoute(name="engage")
+                        
+                    b64_audio = None
+                    if isinstance(item, dict) and item.get("type") == "audio":
+                        b64_audio = item["data"]
+                        text = "Audio Message" # Placeholder
+                        logger.info("🎤 Audio Payload Received for L1 Direct")
                     else:
-                        # Gatekeeper (Async Execution)
-                        # Offload to executor to prevent blocking
-                        loop = asyncio.get_running_loop()
-                        route = await loop.run_in_executor(None, self.router, text)
-                        logger.info(f"Router Latency: {time.perf_counter() - router_start:.3f}s")
-                    if route.name == "ignore":
-                        logger.info("Gatekeeper: Ignored.")
-                        continue
-                    elif route.name == "planning":
-                        logger.info("Gatekeeper: Planning Mode Triggered.")
-                        self._create_bg_task(self._run_l3_planner(session, text))
-                        continue
+                        text = item
+                        if not text.strip(): continue
+                        logger.info(f"🎤 Text Payload Received for L1 Direct")
                     
                     # Clear any residual TTS items from previous turn before starting new one
                     while not self.tts_queue.empty():
@@ -740,10 +664,7 @@ class AgentOrchestrator:
 
                     # ASYNC FORK
                     # 1. L1 Front-End (Immediate Chat)
-                    l1_task = self._create_bg_task(self._run_l1_frontend(session, text, system_context))
-                    
-                    # 2. L2 Dispatcher (Back-End Logic/Tools)
-                    l2_task = self._create_bg_task(self._run_l2_dispatcher(session, text))
+                    l1_task = self._create_bg_task(self._run_l1_frontend(session, text, system_context, b64_audio))
                     
                     await l1_task
 
@@ -801,13 +722,72 @@ class AgentOrchestrator:
                 logger.error(f"Vision Monitor Error: {e}")
                 await asyncio.sleep(1)
 
-    async def _run_l1_frontend(self, session, text, system_context=""):
+    async def _generate_transcript_bg(self, b64_audio, history_ref=None):
+        """Out-of-band background task to get a transcript of the audio."""
+        import aiohttp
+        import asyncio
+        
+        # vLLM has a known concurrent multimodal cache race-condition bug when two requests 
+        # hit the engine simultaneously with the identical audio payload.
+        # We sleep briefly to let the foreground inference thread load the tensor into the cache first.
+        await asyncio.sleep(1.5)
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "model": L1_MODEL,
+                    "messages": [
+                        {"role": "user", "content": [
+                            {"type": "text", "text": "Transcribe the user's spoken audio perfectly. Output ONLY the exact text of what the user says."},
+                            {"type": "audio_url", "audio_url": {"url": f"data:audio/wav;base64,{b64_audio}"}}
+                        ]}
+                    ],
+                    "max_tokens": 150,
+                    "temperature": 0.0
+                }
+                async with session.post(L1_URI, json=payload) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        transcript = data['choices'][0]['message'].get('content', '').strip()
+                        if history_ref is not None:
+                            history_ref["content"] = f"[Transcribed Audio]: {transcript}"
+                        return transcript
+                    else:
+                        text = await resp.text()
+                        logger.error(f"Transcript generation failed: {text}")
+                        if history_ref is not None:
+                            history_ref["content"] = "[Transcribed Audio Failed]"
+                        return None
+        except Exception as e:
+            logger.error(f"Background Transcript Error: {e}")
+            if history_ref is not None:
+                history_ref["content"] = "[Transcribed Audio Failed]"
+            return None
+            
+    async def _run_l1_frontend(self, session, text, system_context="", b64_audio=None):
         """L1: Chat Personality with Memory & Summarization."""
         start_time = time.perf_counter()
         current_time = time.strftime("%H:%M:%S")
         
         # 1. Update History (User)
-        self.state.history.append({"role": "user", "content": text})
+        if b64_audio:
+            time_since_speech = time.perf_counter() - self.state.last_speech_time
+            time_context = f" (Note: You just finished speaking {time_since_speech:.1f} seconds ago. It's highly likely this audio is a direct response to you.)" if time_since_speech < 5.0 else ""
+            logging.info(f"Orchestrator: time_since_speech = {time_since_speech:.1f}s")
+            
+            user_msg = {"role": "user", "content": [
+                {"type": "text", "text": f"Please listen to my audio and respond. Start your response immediately. Treat casual conversation, follow-up questions, and small talk as directed at you{time_context}. If the request asks for complex multi-step planning or research (including follow-ups to past plans), output ONLY <PLAN>search query</PLAN>. ONLY output the tag <IGNORE> if the audio is completely unintelligible background noise or clearly part of a separate side-conversation."},
+                {"type": "audio_url", "audio_url": {"url": f"data:audio/wav;base64,{b64_audio}"}}
+            ]}
+            self.state.history.append(user_msg)
+            
+            # Fire an out-of-band transcript task to not block the main VLM latency
+            # We pass a reference to the dictionary so it can override the audio chunks with plain text
+            transcript_task = self._create_bg_task(self._generate_transcript_bg(b64_audio, history_ref=user_msg))
+        else:
+            self.state.history.append({"role": "user", "content": text})
+            transcript_task = None
+
         
         # 2. Check for Summarization Trigger (if > 20 items)
         if len(self.state.history) > 20:
@@ -831,7 +811,8 @@ class AgentOrchestrator:
             "content": L1_SYSTEM_PROMPT.format(
                 current_time=current_time, 
                 system_context=system_context, 
-                memory_block=memory_block
+                memory_block=memory_block,
+                tools_prompt=get_tools_prompt()
             )
         }
         messages = [system_msg] + self.state.history
@@ -855,6 +836,25 @@ class AgentOrchestrator:
                         full_resp += delta
                         current_sent += delta
                         
+                        # 1. Erase fully-formed hidden blocks from the TTS buffer stream
+                        for tag in ['think', 'thought', 'TOOL', 'PLAN']:
+                            current_sent = re.sub(rf'<{tag}>.*?</{tag}>', '', current_sent, flags=re.DOTALL | re.IGNORECASE)
+                        
+                        # 2. Wait and buffer if we are inside an unclosed hidden block
+                        if any(re.search(rf'<{tag}>(?!.*?</{tag}>)', current_sent, flags=re.DOTALL | re.IGNORECASE) for tag in ['think', 'thought', 'TOOL', 'PLAN']):
+                            continue
+                            
+                        # 3. Strip functional tags (e.g. <ANSWER>)
+                        current_sent = re.sub(r'</?(?:ANSWER|IGNORE)[^>]*>', '', current_sent, flags=re.IGNORECASE)
+                        
+                        # 4. Wait and buffer if a tag boundary might be partially arriving
+                        if re.search(r'</?[a-zA-Z]{0,10}$', current_sent):
+                            continue
+                        
+                        # If after pruning we have nothing but spaces, just continue
+                        if not current_sent.strip():
+                            continue
+                            
                         # TTS Chunking: Split on sentence endings + space/newline.
                         # Optimized for latency: allow short acknowledgments (e.g. "Ok.") to fire immediately.
                         if len(current_sent) > 2 and any(p in current_sent for p in ".?!"):
@@ -876,6 +876,51 @@ class AgentOrchestrator:
             # 4. Update History (Agent)
             if full_resp.strip():
                 self.state.history.append({"role": "model", "content": full_resp.strip()})
+                
+                # Defer logging until transcript is complete so conversation is readable sequentially
+                if transcript_task:
+                    transcript_result = await transcript_task
+                    if transcript_result:
+                         logger.info(f"📝 User: {transcript_result}")
+                
+                logger.info(f"🤖 L1 Agent: '{full_resp.strip()}'")
+                
+                # Parse for L1 Tool Call
+                tool_match = re.search(r'<TOOL>\s*(.*?)\s*</TOOL>', full_resp, flags=re.DOTALL | re.IGNORECASE)
+                plan_match = re.search(r'<PLAN>\s*(.*?)\s*</PLAN>', full_resp, flags=re.DOTALL | re.IGNORECASE)
+
+                if plan_match:
+                    plan_query = plan_match.group(1).strip()
+                    logger.info(f"🤖 L1 Invoking <PLAN> for Cortex lookup: '{plan_query}'")
+                    await self._speak(session, "Let me consult the archives, Captain.")
+                    
+                    result = await self.cortex_client.think(f"Look up the following request and give me a detailed summary of the findings: {plan_query}")
+                    
+                    self.state.history.append({"role": "user", "content": f"<PLAN_RESULT>\n{result}\n</PLAN_RESULT>\nPlease summarize this outcome briefly for me."})
+                    await self._run_l1_frontend(session, "", system_context=system_context, b64_audio=None)
+                    return
+
+                elif tool_match:
+                    try:
+                        clean_tool = tool_match.group(1).replace("```json", "").replace("```", "").strip()
+                        tool_call = json.loads(clean_tool)
+                        
+                        logger.info(f"🤖 L1 Invoking Tool: {tool_call.get('name')}")
+                        tool_start = time.perf_counter()
+                        
+                        # Acknowledge we're doing it:
+                        await self._speak(session, "Checking on that, Captain.")
+                        
+                        result = await self._execute_tool(tool_call)
+                        logger.info(f"Command Execution Latency: {time.perf_counter() - tool_start:.3f}s")
+                        
+                        # Recurse Tool Results back into L1 so it speaks the answer
+                        self.state.history.append({"role": "user", "content": f"<TOOL_RESULT>\n{result}\n</TOOL_RESULT>\nPlease summarize this outcome briefly for me."})
+                        await self._run_l1_frontend(session, "", system_context=system_context, b64_audio=None)
+                        return # Exit the outer loop to prevent duplicate logging
+                        
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse <TOOL> JSON inside L1 stream: {e}")
             
             total_time = time.perf_counter() - start_time
             logger.info(f"L1 Total Latency: {total_time:.3f}s")
@@ -931,47 +976,6 @@ class AgentOrchestrator:
         except Exception as e:
             logger.error(f"Summarization Error: {e}")
 
-    async def _run_l2_dispatcher(self, session, text):
-        """L2: Tool Calling -> L3."""
-        start_time = time.perf_counter()
-        # Check if text implies a tool
-        # FunctionGemma prompt
-        
-        prompt = get_tools_prompt() + L2_SUFFIX_PROMPT.format(user_text=text)
-        messages = [{"role": "user", "content": prompt}]
-        
-        try:
-            async with session.post(L2_URI, json={"model": L2_MODEL, "messages": messages, "stream": False, "max_tokens": 100, "temperature": 0.0}) as resp:
-                if resp.status != 200: return
-                data = await resp.json()
-                content = data['choices'][0]['message']['content']
-                
-                # Attempt to parse JSON
-                try:
-                    # Cleanup markdown code blocks if any
-                    clean_content = content.replace("```json", "").replace("```", "").strip()
-                    if not clean_content or clean_content == "{}": 
-                        logger.info(f"L2 No Tool Latency: {time.perf_counter() - start_time:.3f}s")
-                        return # No tool
-                    
-                    tool_call = json.loads(clean_content)
-                    if "name" not in tool_call: return
-                    
-                    logger.info(f"L2 Tool Call: {tool_call} (Took {time.perf_counter() - start_time:.3f}s)")
-                    
-                    # Execute Tool (Mock/Real)
-                    tool_start = time.perf_counter()
-                    result = await self._execute_tool(tool_call)
-                    logger.info(f"Tool Execution Latency: {time.perf_counter() - tool_start:.3f}s")
-                    
-                    # Pass to L3
-                    await self._run_l3_cortex(session, text, result)
-                    
-                except json.JSONDecodeError:
-                    pass
-        except Exception as e:
-            logger.error(f"L2 Error: {e}")
-
     async def _execute_tool(self, tool_call):
         name = tool_call.get("name")
         args = tool_call.get("parameters", {}) # Or 'args'? Schema said 'parameters' but functiongemma often outputs what matches?
@@ -983,116 +987,6 @@ class AgentOrchestrator:
         elif name == "set_waypoint":
             return f"Waypoint set at {args.get('lat')}, {args.get('lon')}"
         return "Unknown Tool"
-
-    async def _run_l3_cortex(self, session, user_text, tool_result):
-        """L3: Analyze Tool Result and Update User."""
-        start_time = time.perf_counter()
-        logger.info(f"L3 Thinking on: {tool_result}")
-        
-        # Immediate Acknowledgement
-        await self._speak(session, "I'm checking on that.")
-        
-        messages = [
-            {"role": "system", "content": L3_CORTEX_SYSTEM_PROMPT},
-            {"role": "user", "content": L3_CORTEX_USER_TEMPLATE.format(user_text=user_text, tool_result=tool_result)}
-        ]
-        
-        # Generate and then Speak
-        try:
-             # Async Task with "Still checking" updates
-            l3_task = self._create_bg_task(
-                session.post(L3_URI, json={"model": L3_MODEL, "messages": messages, "max_tokens": 150})
-            )
-            
-            while not l3_task.done():
-                await asyncio.sleep(15)
-                if not l3_task.done():
-                     await self._speak(session, "Still checking...")
-            
-            resp = await l3_task
-            
-            async with resp:
-                 data = await resp.json()
-                 reply = data['choices'][0]['message']['content']
-                 
-                 # Strip <think> tags (Robust regex)
-                 reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL | re.IGNORECASE)
-                 reply = re.sub(r'<thought>.*?</thought>', '', reply, flags=re.DOTALL | re.IGNORECASE)
-                 
-                 # Announce Update
-                 logger.info(f"L3 Update: {reply}")
-                 await self._speak(session, f"Captain, update: {reply}")
-                 
-            logger.info(f"L3 Total Latency: {time.perf_counter() - start_time:.3f}s")
-
-        except Exception as e:
-            logger.error(f"L3 Error: {e}")
-
-    async def _run_l3_planner(self, session, text):
-        """L3: Planning Mode (Meta-Planner) with Memory."""
-        start_time = time.perf_counter()
-        logger.info(f"L3 Planning Mode: '{text}'")
-        
-        # Immediate Acknowledgement
-        await self._speak(session, "I'm checking on that.")
-        
-        # We give L3 all tools and ask for a plan
-        all_tools_prompt = get_tools_prompt()
-        
-        # Inject Memory (Summary + Recent History)
-        memory_context = ""
-        if self.state.summary:
-            memory_context += f"\n[LONG-TERM CONTEXT]: {self.state.summary}"
-        
-        # Add last 5 turns of history for immediate context
-        recent_history = self.state.history[-5:] if len(self.state.history) > 0 else []
-        if recent_history:
-            memory_context += "\n[RECENT CHAT HISTORY]:\n"
-            for msg in recent_history:
-                memory_context += f"{msg['role'].upper()}: {msg['content']}\n"
-        
-        messages = [
-            {"role": "system", "content": L3_PLANNER_SYSTEM_PROMPT.format(memory_context=memory_context, all_tools_prompt=all_tools_prompt)},
-            {"role": "user", "content": text}
-        ]
-        
-        try:
-            # Async Task with "Still checking" updates
-            l3_task = self._create_bg_task(
-                session.post(L3_URI, json={"model": L3_MODEL, "messages": messages, "max_tokens": 500})
-            )
-            
-            while not l3_task.done():
-                await asyncio.sleep(15)
-                if not l3_task.done():
-                     await self._speak(session, "Still checking...")
-            
-            resp = await l3_task
-            
-            async with resp:
-                 if resp.status != 200:
-                     logger.error(f"L3 Plan Error: {resp.status}")
-                     await self._speak(session, "Planning matrix offline.")
-                     return
-
-                 data = await resp.json()
-                 plan = data['choices'][0]['message']['content']
-                 
-                 # Strip <think> tags (Robust regex)
-                 plan = re.sub(r'<think>.*?</think>', '', plan, flags=re.DOTALL | re.IGNORECASE)
-                 plan = re.sub(r'<thought>.*?</thought>', '', plan, flags=re.DOTALL | re.IGNORECASE)
-                 
-                 # Announce Plan
-                 logger.info(f"L3 Generated Plan: {plan}")
-                 await self._speak(session, f"Acknowledged. Initiating strategic plan. {plan}")
-                 
-                 # NOTE: In a full implementation, we would parse this plan and execute it loop-style.
-                 # For now, we just verbalize the plan.
-            
-            logger.info(f"L3 Planning Latency: {time.perf_counter() - start_time:.3f}s")
-                 
-        except Exception as e:
-            logger.error(f"L3 Planning Exception: {e}")
 
     def _infer_tags(self, text: str) -> List[str]:
         """Heuristic to inject paralinguistic tags based on text content."""
@@ -1117,7 +1011,7 @@ class AgentOrchestrator:
         # Non-blocking enqueue
         try:
             self.tts_queue.put_nowait(text)
-            logger.debug(f"Enqueued for TTS: '{text}'")
+            logger.info(f"🔊 Queued for Synthesis: '{text}'")
         except Exception as e:
             logger.error(f"Failed to enqueue TTS: {e}")
 

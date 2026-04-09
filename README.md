@@ -19,6 +19,7 @@ For a detailed breakdown of the system capabilities, service orchestration, and 
 *   Docker & NVIDIA Container Runtime
 *   **References**: [Ultralytics NVIDIA Jetson Guide](https://docs.ultralytics.com/guides/nvidia-jetson/)
 *   `micromamba` (Environment: `chatty-buoy`)
+*   **ONNX Runtime GPU (ARM64/CUDA 13)**: Hardware-accelerated inference for ONNX models (YOLO, Silero VAD) on Jetson requires the `onnxruntime-gpu` nightly build for `aarch64` and CUDA 13. We use the [ort-cuda-13-nightly feed](https://github.com/microsoft/onnxruntime/issues/27944) to bypass standard CPU bottlenecks.
 *   **Optional**: `ngc` CLI (Install manually if you need to download new Riva models).
     > [Install NGC CLI](https://org.ngc.nvidia.com/setup/installers/cli)
 

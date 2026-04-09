@@ -45,9 +45,6 @@ def get_tools_prompt() -> str:
     Generates the system prompt segment describing available tools.
     """
     import json
-    return f"""You are a function calling agent. You can only call one of the following tools:
+    return f"""The following tools are available to you. To use one, wrap the exact JSON signature in a <TOOL> block.
 {json.dumps(AVAILABLE_TOOLS, indent=2)}
-
-If the user request cannot be fulfilled by a tool, return an empty JSON object {{}}.
-If the user request matches a tool, return ONLY the JSON for the tool call.
 """

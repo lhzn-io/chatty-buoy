@@ -1,31 +1,31 @@
 services:
   # 1. ASR Service (Riva / Parakeet-TDT 1.1B)
-  asr-service:
-    image: nvcr.io/nvidia/riva/riva-speech:2.24.0-l4t-aarch64
-    container_name: asr-service
-    runtime: nvidia
-    entrypoint: ["/bin/bash", "-c", "start-riva || sleep infinity"]
-    # pid: host # Removed to ensure isolation
-    ipc: host
-    environment:
-      - RIVA_URI=0.0.0.0:50051
-      - NGC_API_KEY=${NGC_API_KEY}
-    # Note: Riva requires .rmir or specific structure. 
-    # If models are in HF cache, we map it, but Riva usually needs `riva-build` step.
-    # Mapping cache to allow access if pre-built models exist there.
-    volumes:
-      - ./riva_quickstart_arm64_v2.24.0/model_repository:/data
-    ports:
-      - "50051:50051"
-    networks:
-      - agent-net
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+#  asr-service:
+#    image: nvcr.io/nvidia/riva/riva-speech:2.24.0-l4t-aarch64
+#    container_name: asr-service
+#    runtime: nvidia
+#    entrypoint: ["/bin/bash", "-c", "start-riva || sleep infinity"]
+#    # pid: host # Removed to ensure isolation
+#    ipc: host
+#    environment:
+#      - RIVA_URI=0.0.0.0:50051
+#      - NGC_API_KEY=${NGC_API_KEY}
+#    # Note: Riva requires .rmir or specific structure. 
+#    # If models are in HF cache, we map it, but Riva usually needs `riva-build` step.
+#    # Mapping cache to allow access if pre-built models exist there.
+#    volumes:
+#      - ./riva_quickstart_arm64_v2.24.0/model_repository:/data
+#    ports:
+#      - "50051:50051"
+#    networks:
+#      - agent-net
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: 1
+#              capabilities: [gpu]
 
   # 2. TTS Service (Chatterbox-Turbo - Quint Persona)
   tts-service:
@@ -33,6 +33,15 @@ services:
       context: .
       dockerfile: docker/voice/Dockerfile
     image: lhzn/chatterbox:thor
+    depends_on:
+      front-end-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
     container_name: tts-service
     runtime: nvidia
     environment:
@@ -59,23 +68,24 @@ services:
 
   # 3. Front-End (L1): Gemma-3-4B
   front-end-service:
-    image: nvcr.io/nvidia/vllm:25.12.post1-py3
+    image: ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor
     container_name: front-end-service
     runtime: nvidia
     restart: unless-stopped
     ipc: host
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      - VLLM_USE_FLASHINFER_MOE_FP4=1
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-      - VLLM_ATTENTION_BACKEND=FLASHINFER
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
+    entrypoint: ["/bin/bash", "-c", "export PIP_CONSTRAINT= && pip install xformers --extra-index-url https://pypi.jetson-ai-lab.io/sbsa/cu130 && pip install --pre triton --find-links https://download.pytorch.org/whl/nightly/cu130/triton/ && pip install soundfile==0.12.1 librosa && pip install -U huggingface_hub mistral_common && pip uninstall -y transformers && pip install git+https://github.com/huggingface/transformers.git -c /dev/null --no-deps && python3 -m vllm.entrypoints.openai.api_server \"$@\"", "--"]
     command: >
-      vllm serve google/gemma-3-4b-it 
-      --quantization fp8 
+      --model google/gemma-4-E4B-it
+      --kv-cache-dtype fp8
       --dtype bfloat16 
-      --gpu-memory-utilization 0.15 
+      --gpu-memory-utilization 0.25
+      --enforce-eager
+      --limit-mm-per-prompt '{"image": 4, "audio": 1}'
       --max-model-len 4096
       --host 0.0.0.0
       --port 8001
@@ -93,50 +103,49 @@ services:
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 180s
-    depends_on:
-      dispatcher-service:
-        condition: service_healthy
+      start_period: 900s
 
   # 4. Dispatcher (L2): FunctionGemma-270m
-  dispatcher-service:
-    image: nvcr.io/nvidia/vllm:25.12.post1-py3
-    container_name: dispatcher-service
-    runtime: nvidia
-    restart: unless-stopped
-    ipc: host
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-    command: >
-      vllm serve google/functiongemma-270m-it 
-      --dtype bfloat16 
-      --gpu-memory-utilization 0.1 
-      --max-model-len 4096
-      --host 0.0.0.0
-      --port 8002
-    ports:
-      - "8002:8002"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8002/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
+#  dispatcher-service:
+#    image: nvcr.io/nvidia/vllm:25.12.post1-py3
+#    container_name: dispatcher-service
+#    runtime: nvidia
+#    restart: unless-stopped
+#    ipc: host
+#    environment:
+#      - CUDA_VISIBLE_DEVICES=0
+#      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+#    volumes:
+#      - ~/.cache/huggingface:/root/.cache/huggingface
+#    entrypoint: ["/bin/bash", "-c", "export PIP_CONSTRAINT= && pip install xformers --extra-index-url https://pypi.jetson-ai-lab.io/sbsa/cu130 && pip install --pre triton --find-links https://download.pytorch.org/whl/nightly/cu130/triton/ && pip install soundfile==0.12.1 librosa && pip install -U huggingface_hub mistral_common && pip uninstall -y transformers && pip install git+https://github.com/huggingface/transformers.git -c /dev/null --no-deps && python3 -m vllm.entrypoints.openai.api_server \"$@\"", "--"]
+#      vllm serve google/functiongemma-270m-it 
+#      --dtype bfloat16 
+#      --gpu-memory-utilization 0.1 
+#      --max-model-len 4096
+#      --host 0.0.0.0
+#      --port 8002
+#    ports:
+#      - "8002:8002"
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: 1
+#              capabilities: [gpu]
+#    healthcheck:
+#      test: ["CMD-SHELL", "curl -f http://localhost:8002/health || exit 1"]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 10
+#      start_period: 60s
 
   # 5. Cortex Service (L3): AllenAI Olmo-3-7B-Think (Reasoning)
   cortex-service:
     image: nvcr.io/nvidia/vllm:25.12.post1-py3
-    container_name: cortex-service
+    depends_on:
+      tts-service:
+        condition: service_healthy
     runtime: nvidia
     restart: unless-stopped
     ipc: host
@@ -163,52 +172,49 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    depends_on:
-      front-end-service:
-        condition: service_healthy
     entrypoint: ["/bin/bash", "/opt/start_cortex.sh"]
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 180s
+      start_period: 900s
 
   # 6. Vision Service (Phase 3.1)
-  vision-service:
-    container_name: vision-service
-    build:
-      context: .
-      dockerfile: src/vision/Dockerfile.vision
-    image: chatty-buoy/vision:latest
-    runtime: nvidia
-    restart: always
-    shm_size: '2gb'
-    ports:
-      - "8556:8556"
-    environment:
-      # --- Camera Source Configuration ---
-      # Option 1: Local Video File (Kitchen Verification - Disabled)
-      # - RTSP_URL=file:///app/data/videos/kitchen_noaudio.mp4
-      # Option 2: Live YouTube RTSP Simulator (Rotterdam Shipspotting)
-      - RTSP_URL=rtsp://mediamtx:8554/live
-      # Option 3: Physical IP Camera
-      #- RTSP_URL=${RTSP_URL:-rtsp://192.168.3.243:8080/video}
-      - REDIS_HOST=redis
-      - VISION_MODE=${VISION_MODE:-marine}
-    volumes:
-      - ./models/vision:/root/.config/Ultralytics
-      - ./models/vision:/app/models
-      - ./data/videos:/app/data/videos # For Local file testing
-    networks:
-      - agent-net
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+#  vision-service:
+#    container_name: vision-service
+#    build:
+#      context: .
+#      dockerfile: src/vision/Dockerfile.vision
+#    image: chatty-buoy/vision:latest
+#    runtime: nvidia
+#    restart: always
+#    shm_size: '2gb'
+#    ports:
+#      - "8556:8556"
+#    environment:
+#      # --- Camera Source Configuration ---
+#      # Option 1: Local Video File (Kitchen Verification - Disabled)
+#      # - RTSP_URL=file:///app/data/videos/kitchen_noaudio.mp4
+#      # Option 2: Live YouTube RTSP Simulator (Rotterdam Shipspotting)
+#      - RTSP_URL=rtsp://mediamtx:8554/live
+#      # Option 3: Physical IP Camera
+#      #- RTSP_URL=${RTSP_URL:-rtsp://192.168.3.243:8080/video}
+#      - REDIS_HOST=redis
+#      - VISION_MODE=${VISION_MODE:-marine}
+#    volumes:
+#      - ./models/vision:/root/.config/Ultralytics
+#      - ./models/vision:/app/models
+#      - ./data/videos:/app/data/videos # For Local file testing
+#    networks:
+#      - agent-net
+#    deploy:
+#      resources:
+#        reservations:
+#          devices:
+#            - driver: nvidia
+#              count: 1
+#              capabilities: [gpu]
 
   # 7. Redis for Event Bus
   redis:
@@ -221,37 +227,37 @@ services:
       - agent-net
 
   # 8. MediaMTX (RTSP Server for Live YouTube Simulation & WebRTC Proxy)
-  mediamtx:
-    image: bluenviron/mediamtx:latest
-    container_name: mediamtx
-    restart: always
-    environment:
-      # Force MediaMTX to advertise the host IP for WebRTC ICE negotiation instead of the internal docker IP
-      - MTX_WEBRTCADDITIONALHOSTS=localhost,karone
-    ports:
-      - "8554:8554"
-      - "1935:1935" # RTMP
-      - "8888:8888" # HLS
-      - "8889:8889" # WebRTC HTTP
-      - "8189:8189/udp" # WebRTC ICE / UDP Stream
-      - "9997:9997" # API
-    networks:
-      - agent-net
+#  mediamtx:
+#    image: bluenviron/mediamtx:latest
+#    container_name: mediamtx
+#    restart: always
+#    environment:
+#      # Force MediaMTX to advertise the host IP for WebRTC ICE negotiation instead of the internal docker IP
+#      - MTX_WEBRTCADDITIONALHOSTS=localhost,karone
+#    ports:
+#      - "8554:8554"
+#      - "1935:1935" # RTMP
+#      - "8888:8888" # HLS
+#      - "8889:8889" # WebRTC HTTP
+#      - "8189:8189/udp" # WebRTC ICE / UDP Stream
+#      - "9997:9997" # API
+#    networks:
+#      - agent-net
 
   # 9. RTSP Simulator (Live YouTube Restreamer)
-  rtsp-simulator:
-    build:
-      context: .
-      dockerfile: src/rtsp_simulator/Dockerfile.rtsp
-    container_name: rtsp-simulator
-    restart: always
-    environment:
-      - YOUTUBE_URL=https://www.youtube.com/watch?v=pBXTZ2rUO3w
-      - RTSP_OUT=rtsp://mediamtx:8554/live
-    networks:
-      - agent-net
-    ports:
-      - "5001:5000"
+#  rtsp-simulator:
+#    build:
+#      context: .
+#      dockerfile: src/rtsp_simulator/Dockerfile.rtsp
+#    container_name: rtsp-simulator
+#    restart: always
+#    environment:
+#      - YOUTUBE_URL=https://www.youtube.com/watch?v=pBXTZ2rUO3w
+#      - RTSP_OUT=rtsp://mediamtx:8554/live
+#    networks:
+#      - agent-net
+#    ports:
+#      - "5001:5000"
 
 networks:
   agent-net:

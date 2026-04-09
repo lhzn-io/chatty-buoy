@@ -18,3 +18,8 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+
+networks:
+  agent-net:
+    external: true
+    name: chatty-buoy_agent-net

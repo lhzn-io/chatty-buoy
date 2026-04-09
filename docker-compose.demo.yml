@@ -1,0 +1,37 @@
+services:
+  # MediaMTX (RTSP Server for Live YouTube Simulation & WebRTC Proxy)
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx
+    restart: always
+    environment:
+      # Force MediaMTX to advertise the host IP for WebRTC ICE negotiation instead of the internal docker IP
+      - MTX_WEBRTCADDITIONALHOSTS=localhost,karone
+    ports:
+      - "8554:8554"
+      - "1935:1935" # RTMP
+      - "8888:8888" # HLS
+      - "8889:8889" # WebRTC HTTP
+      - "8189:8189/udp" # WebRTC ICE / UDP Stream
+      - "9997:9997" # API
+    networks:
+      - chatty-buoy_agent-net
+
+  # RTSP Simulator (Live YouTube Restreamer)
+  rtsp-simulator:
+    build:
+      context: .
+      dockerfile: src/rtsp_simulator/Dockerfile.rtsp
+    container_name: rtsp-simulator
+    restart: always
+    environment:
+      - YOUTUBE_URL=https://www.youtube.com/watch?v=pBXTZ2rUO3w
+      - RTSP_OUT=rtsp://mediamtx:8554/live
+    networks:
+      - chatty-buoy_agent-net
+    ports:
+      - "5001:5000"
+
+networks:
+  chatty-buoy_agent-net:
+    external: true
