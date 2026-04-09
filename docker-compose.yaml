@@ -226,7 +226,23 @@ services:
     networks:
       - agent-net
 
-  # 8. MediaMTX (RTSP Server for Live YouTube Simulation & WebRTC Proxy)
+  # 8. Vector Database (pgvector)
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agentbufferpassword
+      POSTGRES_DB: agent_memory
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - agent-net
+
+  # 9. MediaMTX (RTSP Server for Live YouTube Simulation & WebRTC Proxy)
 #  mediamtx:
 #    image: bluenviron/mediamtx:latest
 #    container_name: mediamtx
@@ -244,7 +260,7 @@ services:
 #    networks:
 #      - agent-net
 
-  # 9. RTSP Simulator (Live YouTube Restreamer)
+  # 10. RTSP Simulator (Live YouTube Restreamer)
 #  rtsp-simulator:
 #    build:
 #      context: .
