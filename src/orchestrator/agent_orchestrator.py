@@ -34,6 +34,7 @@ import sounddevice as sd
 
 from .tool_schema import AVAILABLE_TOOLS, get_tools_prompt
 from src.cortex.client import CortexClient
+from src.cortex.rag import search_docs
 
 from .prompts import (
     CHARACTER_NAME,
@@ -533,6 +534,36 @@ class AgentOrchestrator:
         task.add_done_callback(self.bg_tasks.discard)
         return task
 
+    async def _wait_with_heartbeat(self, session, coro, custom_msgs=None, interval=8.0):
+        import random
+        task = asyncio.create_task(coro)
+        
+        default_msgs = [
+            "Still digging through the archives, Captain...",
+            "Consulting the navigation manuals, just a moment...",
+            "Cross-referencing the database now, stand by...",
+            "Still crunching the data, Captain...",
+            "Processing those coordinates now, bear with me...",
+            "I'm correlating the ship's logs, give me a second...",
+            "Fetching those details from the lower decks...",
+            "Hold fast, Captain, I'm pulling those records...",
+            "Almost there, formatting the report now...",
+            "Still scanning the horizon on that one...",
+            "Just a moment longer, navigating the archives...",
+            "Running the calculations now, Captain...",
+            "Still working on it, diving deep into the system...",
+            "Validating the charts, hold on...",
+            "One moment, Captain, I'm parsing the relevant data..."
+        ]
+        msgs = custom_msgs if custom_msgs else default_msgs
+        
+        while not task.done():
+            done, pending = await asyncio.wait([task], timeout=interval)
+            if task in done:
+                return task.result()
+            await self._speak(session, random.choice(msgs))
+        return task.result()
+
     async def _tts_loop(self):
         """Background worker to consume TTS queue and play audio."""
         logger.info("TTS Worker Started.")
@@ -837,11 +868,11 @@ class AgentOrchestrator:
                         current_sent += delta
                         
                         # 1. Erase fully-formed hidden blocks from the TTS buffer stream
-                        for tag in ['think', 'thought', 'TOOL', 'PLAN']:
+                        for tag in ['think', 'thought', 'TOOL', 'PLAN', 'LOOKUP']:
                             current_sent = re.sub(rf'<{tag}>.*?</{tag}>', '', current_sent, flags=re.DOTALL | re.IGNORECASE)
                         
                         # 2. Wait and buffer if we are inside an unclosed hidden block
-                        if any(re.search(rf'<{tag}>(?!.*?</{tag}>)', current_sent, flags=re.DOTALL | re.IGNORECASE) for tag in ['think', 'thought', 'TOOL', 'PLAN']):
+                        if any(re.search(rf'<{tag}>(?!.*?</{tag}>)', current_sent, flags=re.DOTALL | re.IGNORECASE) for tag in ['think', 'thought', 'TOOL', 'PLAN', 'LOOKUP']):
                             continue
                             
                         # 3. Strip functional tags (e.g. <ANSWER>)
@@ -856,8 +887,9 @@ class AgentOrchestrator:
                             continue
                             
                         # TTS Chunking: Split on sentence endings + space/newline.
-                        # Optimized for latency: allow short acknowledgments (e.g. "Ok.") to fire immediately.
-                        if len(current_sent) > 2 and any(p in current_sent for p in ".?!"):
+                        # Wait for chunks of at least 40 chars to give TTS enough intonation context,
+                        # UNLESS it's a short definitive statement like "Ok." or "Yes."
+                        if any(p in current_sent for p in ".?!") and (len(current_sent) > 40 or current_sent.strip() in ["Ok.", "Yes.", "No.", "Understood."]):
                              # Find the last valid punctuation that is followed by space or is end of string
                              # Avoid splitting on "Capt.", "Mr.", etc? For now, risk it for speed.
                              match = re.search(r'([.?!])(\s+|$)', current_sent)
@@ -888,13 +920,35 @@ class AgentOrchestrator:
                 # Parse for L1 Tool Call
                 tool_match = re.search(r'<TOOL>\s*(.*?)\s*</TOOL>', full_resp, flags=re.DOTALL | re.IGNORECASE)
                 plan_match = re.search(r'<PLAN>\s*(.*?)\s*</PLAN>', full_resp, flags=re.DOTALL | re.IGNORECASE)
+                lookup_match = re.search(r'<LOOKUP>\s*(.*?)\s*</LOOKUP>', full_resp, flags=re.DOTALL | re.IGNORECASE)
 
-                if plan_match:
+                if lookup_match:
+                    quick_query = lookup_match.group(1).strip()
+                    logger.info(f"⚡ L1 Tactical Reference Lookup: '{quick_query}'")
+                    
+                    # Ultra-fast local lookup
+                    rag_start = time.perf_counter()
+                    docs = await search_docs(quick_query, top_k=1)
+                    rag_time = time.perf_counter() - rag_start
+                    
+                    quick_result = "No reference material found."
+                    if docs:
+                        quick_result = f"Source: {docs[0]['metadata'].get('source', '')}\nContent: {docs[0]['content']}"
+                        
+                    logger.info(f"⚡ Tactical context retrieved {len(docs)} chunks in {rag_time:.3f}s")
+                    
+                    # Feed immediately back to L1 
+                    self.state.history.append({"role": "user", "content": f"<LOOKUP_RESULT>\n{quick_result}\n</LOOKUP_RESULT>\nPlease briefly answer the previous question using this reference."})
+                    await self._run_l1_frontend(session, "", system_context=system_context, b64_audio=None)
+                    return
+
+                elif plan_match:
                     plan_query = plan_match.group(1).strip()
                     logger.info(f"🤖 L1 Invoking <PLAN> for Cortex lookup: '{plan_query}'")
                     await self._speak(session, "Let me consult the archives, Captain.")
                     
-                    result = await self.cortex_client.think(f"Look up the following request and give me a detailed summary of the findings: {plan_query}")
+                    cortex_coro = self.cortex_client.think(f"Look up the following request and give me a detailed summary of the findings: {plan_query}")
+                    result = await self._wait_with_heartbeat(session, cortex_coro)
                     
                     self.state.history.append({"role": "user", "content": f"<PLAN_RESULT>\n{result}\n</PLAN_RESULT>\nPlease summarize this outcome briefly for me."})
                     await self._run_l1_frontend(session, "", system_context=system_context, b64_audio=None)
@@ -911,7 +965,9 @@ class AgentOrchestrator:
                         # Acknowledge we're doing it:
                         await self._speak(session, "Checking on that, Captain.")
                         
-                        result = await self._execute_tool(tool_call)
+                        tool_coro = self._execute_tool(tool_call)
+                        result = await self._wait_with_heartbeat(session, tool_coro, interval=8.0)
+                        
                         logger.info(f"Command Execution Latency: {time.perf_counter() - tool_start:.3f}s")
                         
                         # Recurse Tool Results back into L1 so it speaks the answer

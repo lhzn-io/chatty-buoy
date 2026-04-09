@@ -41,3 +41,4 @@ This roadmap tracks the evolution of **Chatty Buoy**, from its initial foundatio
 **Goal**: Proactive monitoring and safety.
 - [ ] **Multi-Modal RAG**: Querying manuals based on visual context.
 - [ ] **Hardware Deployment**: Final optimization for Jetson Thor edge deployment.
+- [ ] **Performance Overhaul**: Execute the [NVFP4 Migration Plan](nvfp4_upgrade_plan.md) to maximize hardware throughput.

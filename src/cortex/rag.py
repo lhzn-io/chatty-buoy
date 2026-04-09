@@ -3,11 +3,14 @@ import os
 import glob
 import json
 import hashlib
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 import logging
 import asyncpg
+import fitz # PyMuPDF
+from PIL import Image
+import io
 from pgvector.asyncpg import register_vector
-from semantic_router.encoders import HuggingFaceEncoder
+from sentence_transformers import SentenceTransformer, CrossEncoder
 
 # CONFIG
 DB_CONFIG = {
@@ -18,40 +21,64 @@ DB_CONFIG = {
     "port": 5432
 }
 PDF_DIR = "./pdfs"
-EMBED_DIM = 384 
+EMBED_DIM = 512  # clip-ViT-B-32 is 512 dim
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RAG-Ingest")
 
-# Initialize Encoder (Snowflake-xs is 384 dim)
-encoder = HuggingFaceEncoder(name="Snowflake/snowflake-arctic-embed-xs")
+# Initialize Multimodal Encoder (OpenAI CLIP ViT-B/32 encodes both text and images to 512-dim natively)
+model = SentenceTransformer("clip-ViT-B-32")
+# Initialize CrossEncoder for text Reranking to fix CLIP's semantic drift
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-async def get_embedding(text: str) -> List[float]:
-    """Generate embedding using local HuggingFace model."""
+async def get_embedding(content: Union[str, Image.Image]) -> List[float]:
     loop = asyncio.get_running_loop()
-    # Snowflake-xs returns list of lists
-    vector = await loop.run_in_executor(None, encoder, [text])
-    return vector[0]
+    vector = await loop.run_in_executor(None, lambda: model.encode(content))
+    return vector.tolist()
 
-async def parse_pdf(filepath: str) -> List[Dict[str, Any]]:
-    """Extract text chunks from PDF."""
+async def parse_pdf_multimodal(filepath: str) -> List[Dict[str, Any]]:
     chunks = []
     try:
-        from pypdf import PdfReader
-        reader = PdfReader(filepath)
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text()
-            if text:
-                chunks.append({
-                    "content": text,
-                    "metadata": {"source": os.path.basename(filepath), "page": i+1}
-                })
+        doc = fitz.open(filepath)
+        for i, page in enumerate(doc):
+            text = page.get_text()
+            if text and text.strip():
+                text_clean = text.strip()
+                # Semantic Text Chunking (sliding window) to prevent diluted vectors
+                start = 0
+                while start < len(text_clean):
+                    end = start + CHUNK_SIZE
+                    chunk_text = text_clean[start:end]
+                    if len(chunk_text.strip()) > 50:
+                        chunks.append({
+                            "type": "text",
+                            "content": chunk_text.strip(),
+                            "metadata": {"source": os.path.basename(filepath), "page": i+1, "type": "text"}
+                        })
+                    start += (CHUNK_SIZE - CHUNK_OVERLAP)
+            
+            for img_index, img in enumerate(page.get_images(full=True)):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                try:
+                    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                    if image.width < 100 or image.height < 100:
+                        continue
+                    chunks.append({
+                        "type": "image",
+                        "content": image,
+                        "metadata": {"source": os.path.basename(filepath), "page": i+1, "type": "image", "img_index": img_index}
+                    })
+                except Exception as e:
+                    logger.error(f"Error reading image on page {i+1}: {e}")
     except Exception as e:
         logger.error(f"Error parsing {filepath}: {e}")
     return chunks
 
 def compute_file_hash(filepath: str) -> str:
-    """Compute SHA256 hash of a file."""
     hasher = hashlib.sha256()
     with open(filepath, "rb") as f:
         for chunk in iter(lambda: f.read(4096), b""):
@@ -61,24 +88,29 @@ def compute_file_hash(filepath: str) -> str:
 async def init_db(pool):
     async with pool.acquire() as conn:
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS documents (
-                id bigserial PRIMARY KEY,
-                content text,
-                metadata jsonb,
-                embedding vector(384)
-            )
-        """)
+        try:
+            await conn.execute("ALTER TABLE documents ALTER COLUMN embedding TYPE vector(512)")
+            logger.info("Altered documents embedding column to 512 dimensions.")
+        except Exception:
+            logger.info("Dropping table documents to recreate with 512 dimensions.")
+            await conn.execute("DROP TABLE IF EXISTS documents")
+            await conn.execute("""
+                CREATE TABLE documents (
+                    id bigserial PRIMARY KEY,
+                    content text,
+                    metadata jsonb,
+                    embedding vector(512)
+                )
+            """)
+        
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS processed_files (
                 filepath text PRIMARY KEY,
                 file_hash text NOT NULL
             )
         """)
-        logger.info("Database initialized.")
 
 async def ingest_docs():
-    """Main ingestion routine."""
     try:
         pool = await asyncpg.create_pool(**DB_CONFIG)
         await init_db(pool)
@@ -93,65 +125,82 @@ async def ingest_docs():
 
     for pdf_file in pdf_files:
         current_hash = compute_file_hash(pdf_file)
-        
         async with pool.acquire() as conn:
-            # Check if file has already been ingested with same hash
             row = await conn.fetchrow("SELECT file_hash FROM processed_files WHERE filepath = $1", pdf_file)
             if row and row['file_hash'] == current_hash:
                 logger.info(f"Skipping {pdf_file} (already processed, hash unchanged).")
                 continue
             
             logger.info(f"Processing {pdf_file}...")
-            chunks = await parse_pdf(pdf_file)
+            chunks = await parse_pdf_multimodal(pdf_file)
             
-            # Delete old chunks for this file if it was modified
             if row:
                 await conn.execute("DELETE FROM documents WHERE metadata->>'source' = $1", os.path.basename(pdf_file))
             
             for chunk in chunks:
                 vector = await get_embedding(chunk["content"])
+                db_content = chunk["content"] if chunk["type"] == "text" else f"[IMAGE Extracted from {os.path.basename(pdf_file)} Page {chunk['metadata']['page']}]"
+                db_content = db_content.replace('\x00', '') # Sanitize illegal Postgres null bytes
                 await conn.execute(
                     "INSERT INTO documents (content, metadata, embedding) VALUES ($1, $2, $3)",
-                    chunk["content"], json.dumps(chunk["metadata"]), vector
+                    db_content, json.dumps(chunk["metadata"]), vector
                 )
             
-            # Update processed_files record
             await conn.execute("""
                 INSERT INTO processed_files (filepath, file_hash) 
                 VALUES ($1, $2) 
                 ON CONFLICT (filepath) DO UPDATE SET file_hash = EXCLUDED.file_hash
             """, pdf_file, current_hash)
             
-        logger.info(f"Ingested {len(chunks)} chunks from {pdf_file}.")
-
+        logger.info(f"Ingested {len(chunks)} multimodal chunks from {pdf_file}.")
     await pool.close()
 
 async def search_docs(query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-    """Search for relevant documents using vector similarity."""
     try:
         pool = await asyncpg.create_pool(**DB_CONFIG)
         async with pool.acquire() as conn:
             await register_vector(conn)
             query_vector = await get_embedding(query)
             
-            # Using cosine distance <=> for similarity search
+            # 1. Broad retrieval (First stage)
+            candidate_k = max(top_k * 5, 15)
             rows = await conn.fetch(f"""
-                SELECT content, metadata, 1 - (embedding <=> $1) AS similarity 
+                SELECT id, content, metadata, 1 - (embedding <=> $1) AS similarity 
                 FROM documents 
                 ORDER BY embedding <=> $1 
                 LIMIT $2
-            """, query_vector, top_k)
+            """, query_vector, candidate_k)
             
-            results = []
+            candidates = []
             for row in rows:
                 metadata = json.loads(row['metadata']) if isinstance(row['metadata'], str) else row['metadata']
-                results.append({
+                candidates.append({
+                    "id": row['id'],
                     "content": row['content'],
                     "metadata": metadata,
                     "similarity": float(row['similarity'])
                 })
+                
         await pool.close()
-        return results
+        
+        if not candidates:
+            return []
+            
+        # 2. Local Cross-Encoder Reranking (Second stage)
+        loop = asyncio.get_running_loop()
+        pairs = [[query, doc['content']] for doc in candidates]
+        
+        # Execute blocking reranker model call in a thread
+        scores = await loop.run_in_executor(None, lambda: reranker.predict(pairs))
+        
+        # Update scores and sort
+        for i, score in enumerate(scores):
+            candidates[i]['rerank_score'] = float(score)
+            
+        # Sort descending by the highly precise rerank score
+        candidates.sort(key=lambda x: x['rerank_score'], reverse=True)
+        return candidates[:top_k]
+        
     except Exception as e:
         logger.error(f"Search failed: {e}")
         return []
@@ -159,5 +208,4 @@ async def search_docs(query: str, top_k: int = 3) -> List[Dict[str, Any]]:
 if __name__ == "__main__":
     if not os.path.exists(PDF_DIR):
         os.makedirs(PDF_DIR)
-    
     asyncio.run(ingest_docs())
