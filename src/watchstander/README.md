@@ -8,18 +8,18 @@ You can hot-swap the video source by modifying the `RTSP_URL` environment variab
 
 The vision service has a built-in daemon that listens to the `vision_control` Redis stream. You can hot-swap the active camera/video source *instantly* without restarting the Docker container!
 
-A helper script is provided at `src/vision/vision_cli.sh` to make dispatching these commands easy.
+A helper script is provided at `src/watchstander/vision_cli.sh` to make dispatching these commands easy.
 
 **Usage:**
 ```bash
 # Switch to the YouTube restreamer simulator (requires a YouTube URL)
-./src/vision/vision_cli.sh switch --youtube https://youtu.be/U-MFYTeJZqc
+./src/watchstander/vision_cli.sh switch --youtube https://youtu.be/U-MFYTeJZqc
 
 # Switch to a local test video file
-./src/vision/vision_cli.sh switch --file /app/data/videos/kitchen_noaudio.mp4
+./src/watchstander/vision_cli.sh switch --file /app/data/videos/kitchen_noaudio.mp4
 
 # Switch to an arbitrary physical IP camera
-./src/vision/vision_cli.sh switch rtsp://192.168.1.50:8080/video
+./src/watchstander/vision_cli.sh switch rtsp://192.168.1.50:8080/video
 ```
 
 ---

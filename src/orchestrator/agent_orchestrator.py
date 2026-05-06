@@ -32,7 +32,7 @@ import numpy as np
 import onnxruntime
 import sounddevice as sd
 
-from .tool_schema import AVAILABLE_TOOLS, get_tools_prompt
+from .tool_schema import AVAILABLE_TOOLS
 from src.cortex.client import CortexClient
 from src.cortex.rag import search_docs
 
@@ -770,7 +770,7 @@ class AgentOrchestrator:
                     "messages": [
                         {"role": "user", "content": [
                             {"type": "text", "text": "Transcribe the user's spoken audio perfectly. Output ONLY the exact text of what the user says."},
-                            {"type": "audio_url", "audio_url": {"url": f"data:audio/wav;base64,{b64_audio}"}}
+                            {"type": "input_audio", "input_audio": {"data": b64_audio, "format": "wav"}}
                         ]}
                     ],
                     "max_tokens": 150,
@@ -808,7 +808,7 @@ class AgentOrchestrator:
             
             user_msg = {"role": "user", "content": [
                 {"type": "text", "text": f"Please listen to my audio and respond. Start your response immediately. Treat casual conversation, follow-up questions, and small talk as directed at you{time_context}. If the request asks for complex multi-step planning or research (including follow-ups to past plans), output ONLY <PLAN>search query</PLAN>. ONLY output the tag <IGNORE> if the audio is completely unintelligible background noise or clearly part of a separate side-conversation."},
-                {"type": "audio_url", "audio_url": {"url": f"data:audio/wav;base64,{b64_audio}"}}
+                {"type": "input_audio", "input_audio": {"data": b64_audio, "format": "wav"}}
             ]}
             self.state.history.append(user_msg)
             
@@ -816,16 +816,14 @@ class AgentOrchestrator:
             # We pass a reference to the dictionary so it can override the audio chunks with plain text
             transcript_task = self._create_bg_task(self._generate_transcript_bg(b64_audio, history_ref=user_msg))
         else:
-            self.state.history.append({"role": "user", "content": text})
+            if text:
+                self.state.history.append({"role": "user", "content": text})
             transcript_task = None
 
         
         # 2. Check for Summarization Trigger (if > 20 items)
         if len(self.state.history) > 20:
              # Trigger background summarization of oldest 10 items
-             # We clone the items to summarize and remove them from main history immediately to keep window small
-             to_summarize = self.state.history[:10]
-             self.state.history = self.state.history[10:]
              # We clone the items to summarize and remove them from main history immediately to keep window small
              to_summarize = self.state.history[:10]
              self.state.history = self.state.history[10:]
@@ -842,8 +840,7 @@ class AgentOrchestrator:
             "content": L1_SYSTEM_PROMPT.format(
                 current_time=current_time, 
                 system_context=system_context, 
-                memory_block=memory_block,
-                tools_prompt=get_tools_prompt()
+                memory_block=memory_block
             )
         }
         messages = [system_msg] + self.state.history
@@ -851,9 +848,10 @@ class AgentOrchestrator:
         full_resp = ""
         current_sent = ""
         first_token_time = None
+        tool_calls_buffer = []
         
         try:
-            async with session.post(L1_URI, json={"model": L1_MODEL, "messages": messages, "stream": True, "max_tokens": 150, "temperature": 0.6, "top_p": 0.9, "repetition_penalty": 1.15}) as resp:
+            async with session.post(L1_URI, json={"model": L1_MODEL, "messages": messages, "tools": AVAILABLE_TOOLS, "stream": True, "max_tokens": 150, "temperature": 0.6, "top_p": 0.9, "repetition_penalty": 1.15}) as resp:
                 async for line in resp.content:
                     if self.state.interrupt_event.is_set(): break
                     
@@ -863,16 +861,43 @@ class AgentOrchestrator:
                         
                     line = line.decode('utf-8').strip()
                     if line.startswith("data: ") and line != "data: [DONE]":
-                        delta = json.loads(line[6:])['choices'][0]['delta'].get('content', '')
+                        payload = json.loads(line[6:])['choices'][0]['delta']
+                        
+                        if 'tool_calls' in payload:
+                            for tc in payload['tool_calls']:
+                                idx = tc.get('index')
+                                while len(tool_calls_buffer) <= idx:
+                                    tool_calls_buffer.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                                
+                                if 'id' in tc and tc['id']:
+                                    tool_calls_buffer[idx]['id'] = tc['id']
+                                if 'function' in tc:
+                                    if 'name' in tc['function'] and tc['function']['name']:
+                                        tool_calls_buffer[idx]['function']['name'] += tc['function']['name']
+                                    if 'arguments' in tc['function'] and tc['function']['arguments']:
+                                        tool_calls_buffer[idx]['function']['arguments'] += tc['function']['arguments']
+                            continue
+
+                        delta = payload.get('content', '')
+                        if not delta: continue
+                        
                         full_resp += delta
                         current_sent += delta
                         
+                        # 0. Erase raw tool calls matching `<|tool_call>...<tool_call|>`
+                        current_sent = re.sub(r'<\|?tool_call>.*?(?:<tool_call\|?>|</tool_call>)', '', current_sent, flags=re.DOTALL | re.IGNORECASE)
+                        current_sent = re.sub(r'<call:[^>]+>', '', current_sent, flags=re.IGNORECASE)
+                        if re.search(r'<\|?tool_call>(?!.*?(?:<tool_call\|?>|</tool_call>))', current_sent, flags=re.DOTALL | re.IGNORECASE):
+                            continue
+                        if re.search(r'<call:[^>]*$', current_sent, flags=re.IGNORECASE):
+                            continue
+
                         # 1. Erase fully-formed hidden blocks from the TTS buffer stream
-                        for tag in ['think', 'thought', 'TOOL', 'PLAN', 'LOOKUP']:
+                        for tag in ['think', 'thought', 'TOOL', 'PLAN', 'LOOKUP', 'call']:
                             current_sent = re.sub(rf'<{tag}>.*?</{tag}>', '', current_sent, flags=re.DOTALL | re.IGNORECASE)
                         
                         # 2. Wait and buffer if we are inside an unclosed hidden block
-                        if any(re.search(rf'<{tag}>(?!.*?</{tag}>)', current_sent, flags=re.DOTALL | re.IGNORECASE) for tag in ['think', 'thought', 'TOOL', 'PLAN', 'LOOKUP']):
+                        if any(re.search(rf'<{tag}>(?!.*?</{tag}>)', current_sent, flags=re.DOTALL | re.IGNORECASE) for tag in ['think', 'thought', 'TOOL', 'PLAN', 'LOOKUP', 'call']):
                             continue
                             
                         # 3. Strip functional tags (e.g. <ANSWER>)
@@ -906,8 +931,14 @@ class AgentOrchestrator:
                      await self._speak(session, current_sent.strip())
             
             # 4. Update History (Agent)
-            if full_resp.strip():
-                self.state.history.append({"role": "model", "content": full_resp.strip()})
+            if full_resp.strip() or tool_calls_buffer:
+                assistant_msg = {"role": "assistant"}
+                if full_resp.strip():
+                    assistant_msg["content"] = full_resp.strip()
+                if tool_calls_buffer:
+                    assistant_msg["tool_calls"] = tool_calls_buffer
+                
+                self.state.history.append(assistant_msg)
                 
                 # Defer logging until transcript is complete so conversation is readable sequentially
                 if transcript_task:
@@ -915,14 +946,64 @@ class AgentOrchestrator:
                     if transcript_result:
                          logger.info(f"📝 User: {transcript_result}")
                 
-                logger.info(f"🤖 L1 Agent: '{full_resp.strip()}'")
+                if full_resp.strip():
+                    logger.info(f"🤖 L1 Agent: '{full_resp.strip()}'")
                 
-                # Parse for L1 Tool Call
-                tool_match = re.search(r'<TOOL>\s*(.*?)\s*</TOOL>', full_resp, flags=re.DOTALL | re.IGNORECASE)
-                plan_match = re.search(r'<PLAN>\s*(.*?)\s*</PLAN>', full_resp, flags=re.DOTALL | re.IGNORECASE)
-                lookup_match = re.search(r'<LOOKUP>\s*(.*?)\s*</LOOKUP>', full_resp, flags=re.DOTALL | re.IGNORECASE)
+                # Check for raw string-based tool calls from LLMs like Gemma when not using OpenAI JSON schema natively
+                raw_tool_match = (
+                    re.search(r'<\|?tool_call>\s*call:\s*([a-zA-Z0-9_]+)\s*(\{.*?\})\s*(?:<tool_call\|?>|</tool_call>)', full_resp, flags=re.DOTALL | re.IGNORECASE) or
+                    re.search(r'<call>\s*([a-zA-Z0-9_]+)\s*(\{.*?\})\s*</call>', full_resp, flags=re.DOTALL | re.IGNORECASE) or
+                    re.search(r'<call:([a-zA-Z0-9_]+)\s*(\{.*?\})\s*/?>', full_resp, flags=re.DOTALL | re.IGNORECASE)
+                ) if full_resp else None
+                
+                if raw_tool_match and not tool_calls_buffer:
+                    func_name = raw_tool_match.group(1).strip()
+                    func_args = raw_tool_match.group(2).strip()
+                    tool_calls_buffer.append({
+                        "id": f"call_{len(self.state.history)}",
+                        "type": "function",
+                        "function": {
+                            "name": func_name,
+                            "arguments": func_args
+                        }
+                    })
 
-                if lookup_match:
+                plan_match = re.search(r'<PLAN>\s*(.*?)\s*</PLAN>', full_resp, flags=re.DOTALL | re.IGNORECASE) if full_resp else None
+                lookup_match = re.search(r'<LOOKUP>\s*(.*?)\s*</LOOKUP>', full_resp, flags=re.DOTALL | re.IGNORECASE) if full_resp else None
+
+                if tool_calls_buffer:
+                    for tool_call in tool_calls_buffer:
+                        func_name = tool_call["function"]["name"]
+                        func_args = tool_call["function"]["arguments"]
+                        tool_id = tool_call["id"]
+                        
+                        logger.info(f"🤖 L1 Invoking Native Tool: {func_name}")
+                        try:
+                            args_dict = json.loads(func_args) if func_args else {}
+                        except Exception:
+                            args_dict = {}
+                            
+                        # execute
+                        tool_start = time.perf_counter()
+                        await self._speak(session, "Checking on that, Captain.")
+                        
+                        tool_coro = self._execute_tool({"name": func_name, "parameters": args_dict})
+                        result = await self._wait_with_heartbeat(session, tool_coro, interval=8.0)
+                        
+                        logger.info(f"Command Execution Latency: {time.perf_counter() - tool_start:.3f}s")
+                        
+                        # Add tool result to history
+                        self.state.history.append({
+                            "role": "tool",
+                            "tool_call_id": tool_id,
+                            "content": result
+                        })
+                        
+                    # Request L1 again to output the result
+                    await self._run_l1_frontend(session, "", system_context=system_context, b64_audio=None)
+                    return # Exit the outer loop to prevent duplicate logging
+                    
+                elif lookup_match:
                     quick_query = lookup_match.group(1).strip()
                     logger.info(f"⚡ L1 Tactical Reference Lookup: '{quick_query}'")
                     
@@ -947,36 +1028,24 @@ class AgentOrchestrator:
                     logger.info(f"🤖 L1 Invoking <PLAN> for Cortex lookup: '{plan_query}'")
                     await self._speak(session, "Let me consult the archives, Captain.")
                     
+                    if not getattr(self.cortex_client, 'enabled', True):
+                        logger.info(f"⚡ Constrained PLAN mode: Local RAG for '{plan_query}'")
+                        docs = await search_docs(plan_query, top_k=3)
+                        
+                        quick_result = "No reference material found."
+                        if docs:
+                            quick_result = "\n\n".join([f"Source: {d['metadata'].get('source', '')} (Page {d['metadata'].get('page', '')})\nContent: {d['content']}" for d in docs])
+                            
+                        self.state.history.append({"role": "user", "content": f"<PLAN_RESULT>\n{quick_result}\n</PLAN_RESULT>\nMy deep reasoning cortex is currently disabled in constrained mode, so attempt to answer the instruction yourself via the retrieved context."})
+                        await self._run_l1_frontend(session, "", system_context=system_context, b64_audio=None)
+                        return
+
                     cortex_coro = self.cortex_client.think(f"Look up the following request and give me a detailed summary of the findings: {plan_query}")
                     result = await self._wait_with_heartbeat(session, cortex_coro)
                     
                     self.state.history.append({"role": "user", "content": f"<PLAN_RESULT>\n{result}\n</PLAN_RESULT>\nPlease summarize this outcome briefly for me."})
                     await self._run_l1_frontend(session, "", system_context=system_context, b64_audio=None)
                     return
-
-                elif tool_match:
-                    try:
-                        clean_tool = tool_match.group(1).replace("```json", "").replace("```", "").strip()
-                        tool_call = json.loads(clean_tool)
-                        
-                        logger.info(f"🤖 L1 Invoking Tool: {tool_call.get('name')}")
-                        tool_start = time.perf_counter()
-                        
-                        # Acknowledge we're doing it:
-                        await self._speak(session, "Checking on that, Captain.")
-                        
-                        tool_coro = self._execute_tool(tool_call)
-                        result = await self._wait_with_heartbeat(session, tool_coro, interval=8.0)
-                        
-                        logger.info(f"Command Execution Latency: {time.perf_counter() - tool_start:.3f}s")
-                        
-                        # Recurse Tool Results back into L1 so it speaks the answer
-                        self.state.history.append({"role": "user", "content": f"<TOOL_RESULT>\n{result}\n</TOOL_RESULT>\nPlease summarize this outcome briefly for me."})
-                        await self._run_l1_frontend(session, "", system_context=system_context, b64_audio=None)
-                        return # Exit the outer loop to prevent duplicate logging
-                        
-                    except json.JSONDecodeError as e:
-                        logger.error(f"Failed to parse <TOOL> JSON inside L1 stream: {e}")
             
             total_time = time.perf_counter() - start_time
             logger.info(f"L1 Total Latency: {total_time:.3f}s")
@@ -1040,6 +1109,9 @@ class AgentOrchestrator:
         
         if name == "get_jetson_telemetry":
             return self.sys_tools.get_report()
+        elif name == "get_current_time":
+            from datetime import datetime
+            return f"The current system time is {datetime.now().strftime('%I:%M %p on %B %d, %Y')}."
         elif name == "set_waypoint":
             return f"Waypoint set at {args.get('lat')}, {args.get('lon')}"
         return "Unknown Tool"

@@ -1,5 +1,5 @@
-# Base Image: DeepStream 8.0 for Jetson/dGPU (Multiarch)
-FROM nvcr.io/nvidia/deepstream:8.0-triton-multiarch
+# Base Image: DeepStream 9.0 for Jetson/dGPU (Multiarch)
+FROM nvcr.io/nvidia/deepstream:9.0-triton-multiarch
 
 # 1. Install System Dependencies
 ENV DEBIAN_FRONTEND=noninteractive
@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
     gir1.2-gst-rtsp-server-1.0 \
     python3-gi-cairo \
     kmod \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install Python Dependencies
@@ -25,8 +26,8 @@ RUN apt-get update && apt-get install -y \
 # Note: DeepStream images often align pip with system packages
 # We will skip upgrading pip to avoid conflict with apt-managed version
 RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
-RUN pip3 install ultralytics redis onnx onnxslim onnxscript
-RUN pip3 install --pre --index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/ onnxruntime-gpu==1.25.0.dev20260331005
+RUN pip3 install --ignore-installed ultralytics redis onnx onnxslim onnxscript flask requests
+RUN pip3 install --pre --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/ onnxruntime-gpu==1.25.0.dev20260331005
 RUN wget https://github.com/NVIDIA-AI-IOT/deepstream_python_apps/releases/download/v1.2.2/pyds-1.2.2-cp312-cp312-linux_aarch64.whl && \
     pip3 install pyds-1.2.2-cp312-cp312-linux_aarch64.whl && \
     rm pyds-1.2.2-cp312-cp312-linux_aarch64.whl
@@ -46,13 +47,14 @@ RUN make -C nvdsinfer_custom_impl_Yolo clean && \
 WORKDIR /app
 
 # Copy App Logic & Configs
-COPY src/vision/watchstander_ds.py .
-COPY src/vision/config_infer_primary.txt .
-COPY src/vision/export_model.py .
-COPY src/vision/labels.txt .
+COPY src/watchstander/watchstander.py .
+COPY src/watchstander/web_dashboard.py .
+COPY src/watchstander/config_infer_primary.txt .
+COPY src/watchstander/export_model.py .
+COPY src/watchstander/labels.txt .
 
 # Entrypoint script to handle export and run
-COPY src/vision/entrypoint.sh .
+COPY src/watchstander/entrypoint.sh .
 RUN chmod +x entrypoint.sh
 
 # Default Command

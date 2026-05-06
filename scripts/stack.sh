@@ -1,76 +1,233 @@
 #!/bin/bash
 set -e
 
-# Threshold: If GPU memory usage is > 5GB, assume zombies or unclean state.
-# Adjust logic: Check if we can allocate what we need?
-# Or simply: "Is the GPU clean?"
+# Idempotent Stack Controller for Chatty-Buoy
+# Usage: ./scripts/stack.sh [start|stop|restart|status|verify] [--force|-f] [--cortex|--no-cortex]
 
-# Check if GPU is in use using nvidia-smi (works without sudo on Jetson/IGPU context sometimes, or just standard)
-echo "🔍 Checking for GPU processes..."
-# Run Python VRAM Check
-if [ -f "scripts/check_vram.py" ]; then
-    python3 scripts/check_vram.py
-    if [ $? -ne 0 ]; then
-        echo "❌ VRAM Check Failed. Aborting startup."
-        exit 1
-    fi
-else
-    echo "⚠️ scripts/check_vram.py not found. Skipping detailed check."
-    # Legacy check removed/skipped
+# Source .env if it exists so CORTEX_ENABLED is picked up directly
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
 fi
 
-echo "✅ GPU is free. Starting Stack..."
+ACTION="start"
+FORCE=false
 
-# Function to wait for a service to be healthy with timeout
+for arg in "$@"; do
+    case $arg in
+        --force|-f|--all) FORCE=true ;;
+        --cortex) export CORTEX_ENABLED=true ;;
+        --no-cortex) export CORTEX_ENABLED=false ;;
+        start) ACTION="start" ;;
+        stop|-k|kill) ACTION="stop" ;;
+        restart) ACTION="restart" ;;
+        status) ACTION="status" ;;
+        verify) ACTION="verify" ;;
+        -h|--help) 
+            echo "Usage: $0 [start|stop|restart|status|verify] [--force|-f] [--cortex|--no-cortex]"
+            exit 0
+            ;;
+    esac
+done
+
+ask_confirm() {
+    local prompt="$1"
+    if [ "$FORCE" == "true" ]; then return 0; fi
+    read -p "$prompt [y/N]: " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then return 0; else return 1; fi
+}
+
+get_status() {
+    docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$1" 2>/dev/null || echo "not-running"
+}
+
 wait_for_healthy() {
     local service=$1
     local timeout=${2:-300} 
     local elapsed=0
     
     echo "⏳ Waiting for $service to become healthy (timeout: ${timeout}s)..."
-    
     while [ $elapsed -lt $timeout ]; do
-        status=$(docker inspect --format='{{.State.Health.Status}}' "$service" 2>/dev/null || echo "starting")
-        
-        if [ "$status" == "healthy" ]; then
-            echo "✅ $service is healthy."
+        status=$(get_status "$service")
+        # For services without healthchecks, "running" is handled as OK.
+        if [ "$status" == "healthy" ] || [ "$status" == "running" ]; then
+            echo "✅ $service is healthy/running."
             return 0
         elif [ "$status" == "unhealthy" ]; then
             echo "⚠️  $service is unhealthy. Checking logs..."
-            # If it's explicitly unhealthy, we might want to restart it once
-            # but usually it's better to let the user know.
-            break
+            docker logs --tail 20 "$service"
+            return 1
         fi
-        
         sleep 5
         elapsed=$((elapsed + 5))
     done
+    echo "❌ $service failed to become ready. Status: $status"
+    docker logs --tail 20 "$service"
+    return 1
+}
 
-    if [ "$status" != "healthy" ]; then
-        echo "❌ $service failed to become healthy. Status: $status"
-        docker logs --tail 20 "$service"
-        exit 1
+drop_caches() {
+    echo "🧹 Dropping system caches..."
+    if [ -f "scripts/drop_caches.sh" ]; then
+        ./scripts/drop_caches.sh
+    else
+        echo "⚠️  scripts/drop_caches.sh not found."
     fi
 }
 
-# 1. Start Infrastructure (ASR & TTS)
-echo "🚀 Starting Layer 0 (ASR/TTS)..."
-docker compose up -d asr-service tts-service
+check_vram() {
+    if [ -f "scripts/check_vram.py" ]; then
+        if ! python3 scripts/check_vram.py; then
+            echo "❌ VRAM Check Failed. Not enough memory."
+            return 1
+        fi
+    fi
+    return 0
+}
 
-# 2. Start Dispatcher (L2)
-echo "🚀 Starting Layer 2 (Dispatcher)..."
-docker compose up -d dispatcher-service
-wait_for_healthy dispatcher-service 120
+kill_and_clean() {
+    echo "🛑 Stopping all services..."
+    docker compose down
+    drop_caches
+}
 
-# 3. Start Front-End (L1)
-echo "🚀 Starting Layer 1 (Front-End)..."
-docker compose up -d front-end-service
-wait_for_healthy front-end-service 300
+ensure_service() {
+    local service=$1
+    local timeout=$2
+    local status=$(get_status "$service")
+    
+    if [ "$status" == "healthy" ] || [ "$status" == "running" ]; then
+        echo "💡 $service is already running. Skipping."
+    else
+        echo "🚀 Starting $service..."
+        docker compose up -d "$service"
+        wait_for_healthy "$service" "$timeout" || exit 1
+    fi
+}
 
-# 4. Start Cortex (L3)
-echo "🚀 Starting Layer 3 (Cortex)..."
-docker compose up -d cortex-service
-wait_for_healthy cortex-service 400
+if [ "$ACTION" == "status" ]; then
+    echo "📊 Stack Status (CORTEX_ENABLED=${CORTEX_ENABLED:-false}):"
+    SERVICES_TO_CHECK="redis postgres vision-service tts-service front-end-service cosmos-vision"
+    if [ "${CORTEX_ENABLED:-false}" == "true" ]; then
+        SERVICES_TO_CHECK="$SERVICES_TO_CHECK cortex-service"
+    fi
+    for s in $SERVICES_TO_CHECK; do
+        printf "  %-20s : %s\n" "$s" "$(get_status $s)"
+    done
+    exit 0
+fi
 
-echo "🎉 Full stack is UP and verified."
-./scripts/verify_stack.sh
+if [ "$ACTION" == "stop" ]; then
+    if ask_confirm "Are you sure you want to stop all services and drop caches?"; then
+        kill_and_clean
+        echo "✅ Services stopped and memory cleared."
+    else
+        echo "Aborted."
+    fi
+    exit 0
+fi
+
+if [ "$ACTION" == "restart" ]; then
+    if ask_confirm "Force restart will disrupt active services. Proceed?"; then
+        kill_and_clean
+        ACTION="start" # Proceed to start after killing
+    else
+        echo "Aborted."
+        exit 0
+    fi
+fi
+
+if [ "$ACTION" == "start" ]; then
+    echo "🔍 Verifying environment state..."
+    
+    # Check if we need to start heavy LLM containers
+    FE_STATUS=$(get_status "front-end-service")
+    CX_STATUS=$(get_status "cortex-service")
+    
+    NEEDS_RESTART=false
+    if [ "$FE_STATUS" != "healthy" ]; then
+        NEEDS_RESTART=true
+    fi
+    if [ "${CORTEX_ENABLED:-false}" == "true" ] && [ "$CX_STATUS" != "healthy" ]; then
+        NEEDS_RESTART=true
+    fi
+
+    if [ "$NEEDS_RESTART" == "true" ]; then
+        if ! check_vram; then
+            echo "⚠️  Memory is tight and we need to start heavy services."
+            if ask_confirm "Would you like to force kill existing containers and clear memory automatically?"; then
+                kill_and_clean
+                check_vram || { echo "❌ Still not enough memory after cleaning up."; exit 1; }
+            else
+                echo "❌ Cannot proceed without sufficient memory. Aborting."
+                exit 1
+            fi
+        else
+            echo "✅ Sufficient memory available."
+        fi
+    else
+        echo "✅ Required local LLMs are already healthy and holding their memory."
+    fi
+
+    # Best-effort startup sequence (Idempotent)
+    echo "🚀 Layer 0: Infrastructure"
+    ensure_service "redis" 60
+    ensure_service "postgres" 60
+    ensure_service "tts-service" 120
+
+    echo "🚀 Layer 1: Front-End"
+    ensure_service "front-end-service" 300
+    ensure_service "vision-service" 300
+    ensure_service "cosmos-vision" 300
+
+    echo "🚀 Layer 3: Cortex"
+    if [ "${CORTEX_ENABLED:-false}" == "true" ]; then
+        ensure_service "cortex-service" 900
+    else
+        echo "💡 Cortex is disabled (CORTEX_ENABLED=false). Skipping."
+    fi
+
+    echo "🎉 Stack Controller verified all services are running stably."
+    ACTION="verify" # Fall through to run verification immediately
+fi
+
+if [ "$ACTION" == "verify" ]; then
+    echo "🔍 Verifying Microservices Endpoints..."
+    echo "-----------------------------------"
+    
+    declare -A SERVICES
+    SERVICES=(
+        ["Front-End (L1)"]="http://localhost:8001/health"
+        ["TTS (Chatterbox)"]="http://localhost:8003/health"
+        ["Vision (Sentinel Dashboard)"]="http://localhost:8080"
+        ["Cosmos Vision)="]="http://localhost:8010/v1/models"
+    )
+    
+    if [ "${CORTEX_ENABLED:-false}" == "true" ]; then
+        SERVICES["Cortex (L3)"]="http://localhost:8000/health"
+    else
+        echo "💡 Skipping Cortex verification (Disabled mode)."
+    fi
+    
+    ALL_HEALTHY=true
+    for NAME in "${!SERVICES[@]}"; do
+        URL="${SERVICES[$NAME]}"
+        if curl -s --max-time 2 "$URL" > /dev/null; then
+            echo "✅ $NAME: Healthy ($URL)"
+        else
+            echo "❌ $NAME: Unhealthy or Unreachable ($URL)"
+            ALL_HEALTHY=false
+        fi
+    done
+    
+    echo "-----------------------------------"
+    if [ "$ALL_HEALTHY" = true ]; then
+        echo "🎉 All Systems Nominal. Stack is READY."
+        exit 0
+    else
+        echo "⚠️  Some services are down. Check logs."
+        exit 1
+    fi
+fi

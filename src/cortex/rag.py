@@ -29,11 +29,28 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RAG-Ingest")
 
 # Initialize Multimodal Encoder (OpenAI CLIP ViT-B/32 encodes both text and images to 512-dim natively)
-model = SentenceTransformer("clip-ViT-B-32")
+model = None
 # Initialize CrossEncoder for text Reranking to fix CLIP's semantic drift
-reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+reranker = None
+
+# Enable/Disable RAG feature with an environment toggle (default to False to prevent unwanted startup downloads)
+ENABLE_RAG = os.environ.get("ENABLE_RAG", "false").lower() in ("true", "1", "yes")
+
+def _lazy_init_models():
+    global model, reranker
+    if not ENABLE_RAG:
+        return
+    if model is None:
+        logger.info("Lazy-loading SentenceTransformer model...")
+        model = SentenceTransformer("clip-ViT-B-32")
+    if reranker is None:
+        logger.info("Lazy-loading CrossEncoder model...")
+        reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 async def get_embedding(content: Union[str, Image.Image]) -> List[float]:
+    _lazy_init_models()
+    if model is None:
+        return [0.0] * EMBED_DIM
     loop = asyncio.get_running_loop()
     vector = await loop.run_in_executor(None, lambda: model.encode(content))
     return vector.tolist()
@@ -111,6 +128,10 @@ async def init_db(pool):
         """)
 
 async def ingest_docs():
+    if not ENABLE_RAG:
+        logger.info("RAG is disabled. Skipping document ingestion.")
+        return
+
     try:
         pool = await asyncpg.create_pool(**DB_CONFIG)
         await init_db(pool)
@@ -156,6 +177,9 @@ async def ingest_docs():
     await pool.close()
 
 async def search_docs(query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+    if not ENABLE_RAG:
+        return []
+        
     try:
         pool = await asyncpg.create_pool(**DB_CONFIG)
         async with pool.acquire() as conn:

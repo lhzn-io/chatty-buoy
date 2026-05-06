@@ -42,6 +42,10 @@ Interact with the system.
 micromamba run -n chatty-buoy python3 src/agent_reflex.py
 ```
 
+**Step D: Sentinel Watchstander Dashboard**
+The containerized Watchstander automatically observes bounding box events and requests scene summaries from Cosmos-Vision.
+Access the web feed live at: `http://localhost:8080`
+
 ## Roadmap
 
 We are currently in **Phase 3 (Situational Awareness)**. See [Roadmap](docs/planning/roadmap.md) for the journey ahead, including NMEA integration, Sonar analysis, and Vision capabilities.

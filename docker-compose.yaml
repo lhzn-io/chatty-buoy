@@ -33,9 +33,6 @@ services:
       context: .
       dockerfile: docker/voice/Dockerfile
     image: lhzn/chatterbox:thor
-    depends_on:
-      front-end-service:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
       interval: 10s
@@ -46,11 +43,12 @@ services:
     runtime: nvidia
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
       #- VOICE_REF_FILE=quint-processed.wav
       #- VOICE_REF_FILE=ahab-life-amid-mild-seas.wav
       - VOICE_REF_FILE=jerry_seinfeld_prompt.wav
-      #- VOICE_REF_FILE=juan-soto-optimized.wav
+      #- VOICE_REF_FILE=dwight_prompt.wav
     volumes:
       - ./config:/app/config
       - ./src/voice:/app/src/voice
@@ -66,29 +64,30 @@ services:
               count: 1
               capabilities: [gpu]
 
-  # 3. Front-End (L1): Gemma-3-4B
+  # 3. Front-End (L1): Gemma-4-E4B-Multimodal
   front-end-service:
-    image: ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor
+    image: ghcr.io/nvidia-ai-iot/vllm:gemma4-jetson-thor
     container_name: front-end-service
     runtime: nvidia
     restart: unless-stopped
     ipc: host
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
-    entrypoint: ["/bin/bash", "-c", "export PIP_CONSTRAINT= && pip install xformers --extra-index-url https://pypi.jetson-ai-lab.io/sbsa/cu130 && pip install --pre triton --find-links https://download.pytorch.org/whl/nightly/cu130/triton/ && pip install soundfile==0.12.1 librosa && pip install -U huggingface_hub mistral_common && pip uninstall -y transformers && pip install git+https://github.com/huggingface/transformers.git -c /dev/null --no-deps && python3 -m vllm.entrypoints.openai.api_server \"$@\"", "--"]
-    command: >
-      --model google/gemma-4-E4B-it
-      --kv-cache-dtype fp8
-      --dtype bfloat16 
-      --gpu-memory-utilization 0.25
-      --enforce-eager
-      --limit-mm-per-prompt '{"image": 4, "audio": 1}'
-      --max-model-len 4096
-      --host 0.0.0.0
-      --port 8001
+    entrypoint: [
+      "vllm", "serve", "google/gemma-4-E4B-it",
+      "--gpu-memory-utilization", "0.15",
+      "--max-model-len", "4096",
+      "--enable-auto-tool-choice",
+      "--reasoning-parser", "gemma4",
+        "--enforce-eager",
+      "--tool-call-parser", "gemma4",
+      "--host", "0.0.0.0",
+      "--port", "8001"
+    ]
     ports:
       - "8001:8001"
     deploy:
@@ -104,11 +103,64 @@ services:
       timeout: 5s
       retries: 20
       start_period: 900s
+    networks:
+      - agent-net
 
-  # 4. Dispatcher (L2): FunctionGemma-270m
-#  dispatcher-service:
-#    image: nvcr.io/nvidia/vllm:25.12.post1-py3
-#    container_name: dispatcher-service
+
+  # 4. Cosmos Vision Sentinel Service (L3): Multimodal Reasoning (Cosmos Reason 2 2B run out-of-band)
+  cosmos-vision:
+    image: ghcr.io/nvidia-ai-iot/vllm:0.14.0-r38.3-arm64-sbsa-cu130-24.04
+    container_name: cosmos-vision
+    runtime: nvidia
+    restart: unless-stopped
+    ipc: host
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - ~/.cache/huggingface/hub:/root/.cache/huggingface/hub:ro
+      - ~/.cache/vllm:/root/.cache/vllm
+    entrypoint: [
+      "vllm", "serve", "nvidia/Cosmos-Reason2-2B",
+      "--served-model-name", "nvidia/cosmos-reason2-2b-fp8",
+      "--trust-remote-code",
+      "--gpu-memory-utilization", "0.20",
+      "--max-model-len", "8192",
+      "--media-io-kwargs", "{\"video\": {\"num_frames\": -1}}",
+      "--reasoning-parser", "qwen3",
+      "--enable-prefix-caching",
+      "--host", "0.0.0.0",
+      "--port", "8010"
+    ]
+    ports:
+      - "8010:8010"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8010/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 900s
+    networks:
+      - agent-net
+
+  # 5. Cortex Service (L3): Multimodal Reasoning (Gemma-4-26B) (Disabled to free VRAM for Cosmos)
+#  cortex-service:
+#    image: ghcr.io/nvidia-ai-iot/vllm:gemma4-jetson-thor
+#    entrypoint: >
+#      vllm serve bg-digitalservices/Gemma-4-26B-A4B-it-NVFP4
+#      --host 0.0.0.0
+#      --port 8000
+#      --gpu-memory-utilization 0.45
+#      --enable-auto-tool-choice
+#      --reasoning-parser gemma4
+#      --tool-call-parser gemma4
 #    runtime: nvidia
 #    restart: unless-stopped
 #    ipc: host
@@ -117,15 +169,12 @@ services:
 #      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
 #    volumes:
 #      - ~/.cache/huggingface:/root/.cache/huggingface
-#    entrypoint: ["/bin/bash", "-c", "export PIP_CONSTRAINT= && pip install xformers --extra-index-url https://pypi.jetson-ai-lab.io/sbsa/cu130 && pip install --pre triton --find-links https://download.pytorch.org/whl/nightly/cu130/triton/ && pip install soundfile==0.12.1 librosa && pip install -U huggingface_hub mistral_common && pip uninstall -y transformers && pip install git+https://github.com/huggingface/transformers.git -c /dev/null --no-deps && python3 -m vllm.entrypoints.openai.api_server \"$@\"", "--"]
-#      vllm serve google/functiongemma-270m-it 
-#      --dtype bfloat16 
-#      --gpu-memory-utilization 0.1 
-#      --max-model-len 4096
-#      --host 0.0.0.0
-#      --port 8002
 #    ports:
-#      - "8002:8002"
+#      - "8000:8000"
+#    shm_size: '16gb'
+#    ulimits:
+#      memlock: -1
+#      stack: 67108864
 #    deploy:
 #      resources:
 #        reservations:
@@ -134,37 +183,42 @@ services:
 #              count: 1
 #              capabilities: [gpu]
 #    healthcheck:
-#      test: ["CMD-SHELL", "curl -f http://localhost:8002/health || exit 1"]
+#      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
 #      interval: 10s
 #      timeout: 5s
-#      retries: 10
-#      start_period: 60s
+#      retries: 20
+#      start_period: 900s
 
-  # 5. Cortex Service (L3): AllenAI Olmo-3-7B-Think (Reasoning)
-  cortex-service:
-    image: nvcr.io/nvidia/vllm:25.12.post1-py3
-    depends_on:
-      tts-service:
-        condition: service_healthy
+  # 6. Vision Service (Sentinel Mode + Dashboard)
+  vision-service:
+    container_name: vision-service
+    build:
+      context: .
+      dockerfile: src/watchstander/Dockerfile.vision
+    image: chatty-buoy/vision:latest
     runtime: nvidia
-    restart: unless-stopped
-    ipc: host
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-      - VLLM_USE_FLASHINFER_MOE_FP4=0 # Disable FP4 for Llama
-      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-      - MAX_JOBS=12
-    volumes:
-      - ~/.cache/huggingface:/root/.cache/huggingface
-      - ~/.cache/vllm:/root/.cache/vllm
-      - ./scripts/start_cortex.sh:/opt/start_cortex.sh
-      - ./models/cortex:/models/config # For storing the parser script
+    restart: always
+    shm_size: '2gb'
     ports:
-      - "8000:8000"
-    shm_size: '16gb'
-    ulimits:
-      memlock: -1
-      stack: 67108864
+      - "8080:8080" # Web Dashboard
+    environment:
+      # --- Camera Source Configuration ---
+      - RTSP_URL=v4l2:///dev/video0
+      - REDIS_HOST=redis
+      - COSMOS_VLLM_URL=http://cosmos-vision:8010/v1/chat/completions
+      - COSMOS_MODEL_NAME=nvidia/cosmos-reason2-2b-fp8
+      - VISION_MODE=${VISION_MODE:-marine}
+    volumes:
+      - ./models/vision:/root/.config/Ultralytics
+      - ./models/vision:/app/models
+      - ./data/videos:/app/data/videos # For Local file testing
+      - ./yolo26n.pt:/app/yolo26n.pt
+      - ./src/watchstander/watchstander.py:/app/watchstander.py # Dev Mount
+      - ./scripts/web_dashboard.py:/app/web_dashboard.py # Dev Mount
+    devices:
+      - "/dev/video0:/dev/video0"
+    networks:
+      - agent-net
     deploy:
       resources:
         reservations:
@@ -172,49 +226,6 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    entrypoint: ["/bin/bash", "/opt/start_cortex.sh"]
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-      start_period: 900s
-
-  # 6. Vision Service (Phase 3.1)
-#  vision-service:
-#    container_name: vision-service
-#    build:
-#      context: .
-#      dockerfile: src/vision/Dockerfile.vision
-#    image: chatty-buoy/vision:latest
-#    runtime: nvidia
-#    restart: always
-#    shm_size: '2gb'
-#    ports:
-#      - "8556:8556"
-#    environment:
-#      # --- Camera Source Configuration ---
-#      # Option 1: Local Video File (Kitchen Verification - Disabled)
-#      # - RTSP_URL=file:///app/data/videos/kitchen_noaudio.mp4
-#      # Option 2: Live YouTube RTSP Simulator (Rotterdam Shipspotting)
-#      - RTSP_URL=rtsp://mediamtx:8554/live
-#      # Option 3: Physical IP Camera
-#      #- RTSP_URL=${RTSP_URL:-rtsp://192.168.3.243:8080/video}
-#      - REDIS_HOST=redis
-#      - VISION_MODE=${VISION_MODE:-marine}
-#    volumes:
-#      - ./models/vision:/root/.config/Ultralytics
-#      - ./models/vision:/app/models
-#      - ./data/videos:/app/data/videos # For Local file testing
-#    networks:
-#      - agent-net
-#    deploy:
-#      resources:
-#        reservations:
-#          devices:
-#            - driver: nvidia
-#              count: 1
-#              capabilities: [gpu]
 
   # 7. Redis for Event Bus
   redis:
@@ -241,24 +252,6 @@ services:
       - ./data/postgres:/var/lib/postgresql/data
     networks:
       - agent-net
-
-  # 9. MediaMTX (RTSP Server for Live YouTube Simulation & WebRTC Proxy)
-#  mediamtx:
-#    image: bluenviron/mediamtx:latest
-#    container_name: mediamtx
-#    restart: always
-#    environment:
-#      # Force MediaMTX to advertise the host IP for WebRTC ICE negotiation instead of the internal docker IP
-#      - MTX_WEBRTCADDITIONALHOSTS=localhost,karone
-#    ports:
-#      - "8554:8554"
-#      - "1935:1935" # RTMP
-#      - "8888:8888" # HLS
-#      - "8889:8889" # WebRTC HTTP
-#      - "8189:8189/udp" # WebRTC ICE / UDP Stream
-#      - "9997:9997" # API
-#    networks:
-#      - agent-net
 
   # 10. RTSP Simulator (Live YouTube Restreamer)
 #  rtsp-simulator:

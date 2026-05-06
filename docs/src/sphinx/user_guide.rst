@@ -78,5 +78,39 @@ In your main terminal:
 
 *   **Speak**: The system listens via ALSA (Default Device / Jabra).
 *   **Reflex**: Simple queries or conversational fillers are handled immediately.
-*   **Brain**: Complex queries are routed to Nemotron-3.
-*   **Response**: Audio is synthesized by CosyVoice2 (FP8) and played back via ALSA.
+4. Configure Watchstander Vision (Sentinel Mode)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The system includes a containerized Watchstander component powered by **Cosmos-Reason2-2B**. It maintains a rolling video buffer and automatically interprets complex scenes (Sentinel Mode) using DeepStream bounding boxes when whitelisted objects (like people or vessels) are detected, pushing insights to the agent's memory via Redis.
+
+**Dashboard**: Once `docker compose up -d` is running, the Sentinel Web Dashboard is available at `http://localhost:8080`.
+Through the dashboard, you can monitor the live event feed, review Cosmos reasoning clips, and dynamically tune the VLM prompt configurations without restarting the service.
+
+You can configure the video source using the ``RTSP_URL`` variable in ``docker-compose.yaml`` under the ``vision-service`` (or ``cosmos-vision``) configurations:
+
+*   **Physical IP Webcam**:
+    Pass the direct RTSP stream URL to ``RTSP_URL``:
+
+    .. code-block:: yaml
+
+       environment:
+         - RTSP_URL=rtsp://192.168.3.243:8080/video
+
+*   **Direct USB HD Camera (plugged into Thor)**:
+    Mount the hardware device and set ``RTSP_URL`` to the local index (``0``).
+
+    .. code-block:: yaml
+
+       # In docker-compose.yaml under vision-service:
+       devices:
+         - "/dev/video0:/dev/video0"
+       environment:
+         - RTSP_URL=0
+
+*   **Live YouTube Video Stream (Simulator)**:
+    Uncomment the ``mediamtx`` and ``rtsp-simulator`` services in your docker-compose file. Set ``YOUTUBE_URL``, and point the vision service to the local media server:
+
+    .. code-block:: yaml
+
+       environment:
+         - RTSP_URL=rtsp://mediamtx:8554/live

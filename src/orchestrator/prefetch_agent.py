@@ -28,7 +28,7 @@ DB_CONFIG = {
 }
 
 L1_URI = "http://localhost:8001/v1/chat/completions"
-L1_MODEL = "google/gemma-4-E2B-it"
+L1_MODEL = "google/gemma-4-E4B-it"
 
 # Threshold for similarity or top-k
 TOP_K = 3

@@ -4,7 +4,7 @@
 # This script sends dynamic configuration commands to the vision-service container via Redis.
 
 show_help() {
-    echo "Usage: ./src/vision/vision_cli.sh <command> [options]"
+    echo "Usage: ./src/watchstander/vision_cli.sh <command> [options]"
     echo ""
     echo "Commands:"
     echo "  switch <url>           Dynamically switch the active camera source"
@@ -12,9 +12,9 @@ show_help() {
     echo "  switch --youtube <url> Shortcut: Switches the runtime simulator to a YouTube live stream"
     echo ""
     echo "Examples:"
-    echo "  ./src/vision/vision_cli.sh switch rtsp://10.0.0.51:8080/video"
-    echo "  ./src/vision/vision_cli.sh switch --youtube https://www.youtube.com/watch?v=pBXTZ2rUO3w"
-    echo "  ./src/vision/vision_cli.sh switch --file /app/data/videos/rotterdam_shipspotting.mp4"
+    echo "  ./src/watchstander/vision_cli.sh switch rtsp://10.0.0.51:8080/video"
+    echo "  ./src/watchstander/vision_cli.sh switch --youtube https://www.youtube.com/watch?v=pBXTZ2rUO3w"
+    echo "  ./src/watchstander/vision_cli.sh switch --file /app/data/videos/rotterdam_shipspotting.mp4"
 }
 
 if [ -z "$1" ]; then
