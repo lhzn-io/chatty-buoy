@@ -34,7 +34,8 @@ COSMOS_VLLM_URL = os.environ.get("COSMOS_VLLM_URL", "http://cosmos-vision:8010/v
 
 FRAME_BUFFER = collections.deque(maxlen=150)
 LAST_SENTINEL_TRIGGER = 0
-SENTINEL_COOLDOWN = 10
+SENTINEL_COOLDOWN = int(os.environ.get("SENTINEL_COOLDOWN", 10))
+MAX_CACHED_VIDEOS = int(os.environ.get("MAX_CACHED_VIDEOS", 50))
 MANUAL_SENTINEL_TRIGGER = False
 
 def process_sentinel_video_delayed(fps, event_class):
@@ -66,6 +67,24 @@ def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary")
         
         shutil.copy(tmp_file, debug_file)
         logger.info(f"Saved debug clip to {debug_file}")
+
+        # FIFO Cache for rolling clips
+        import glob
+        video_dir = "/app/data/videos"
+        event_ts = int(time.time())
+        historical_file = f"{video_dir}/event_{event_ts}.mp4"
+        shutil.copy(tmp_file, historical_file)
+        
+        # Enforce FIFO limit
+        if MAX_CACHED_VIDEOS > 0:
+            cached_files = sorted(glob.glob(f"{video_dir}/event_*.mp4"), key=os.path.getmtime)
+            while len(cached_files) > MAX_CACHED_VIDEOS:
+                oldest_file = cached_files.pop(0)
+                try:
+                    os.remove(oldest_file)
+                    logger.debug(f"Removed old cached clip to maintain FIFO limit: {oldest_file}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove {oldest_file}: {e}")
         
         with open(tmp_file, "rb") as vf:
             encoded_string = base64.b64encode(vf.read()).decode('utf-8')
@@ -73,8 +92,8 @@ def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary")
         data_uri = f"data:video/mp4;base64,{encoded_string}"
         
         logger.info("Submitting clip to Cosmos API...")
-        system_prompt = "You are Sentinel, an autonomous AI watchstander. Your duty is to continuously monitor video feeds, detect anomalies, track moving objects (especially people and vessels), and provide clear, structured situation reports."
-        user_prompt = "Observe this short video clip. Please provide:\n1. A detailed scene analysis.\n2. Any objects or people of interest.\n3. Anomaly detection (is anything out of the ordinary?).\nStructure your response clearly and explain your reasoning."
+        system_prompt = "You are Sentinel, an autonomous AI watchstander. Your duty is to continuously monitor video feeds, detect anomalies, track moving objects (especially people and vessels), and provide clear, structured situation reports. YOU MUST RESPOND STRICTLY IN ENGLISH."
+        user_prompt = "Observe this short video clip. Please provide:\n1. A detailed scene analysis.\n2. Any objects or people of interest.\n3. Anomaly detection (is anything out of the ordinary?).\nStructure your response clearly and explain your reasoning. DO NOT OUTPUT CHINESE CHARACTERS."
         
         if redis_client:
             stored_sys = redis_client.get("prompt:cosmos:system")
@@ -117,7 +136,7 @@ def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary")
                 "image_base64": thumb_base64,
                 "timestamp": time.time()
             }
-            redis_client.xadd("vision_events", event_data, maxlen=100)
+            redis_client.xadd("vision_events", event_data, maxlen=10000)
             
     except Exception as e:
         logger.error(f"Failed to query Cosmos API: {e}")
@@ -264,7 +283,7 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
         if redis_client:
             for ev in events_to_publish:
                 try:
-                    redis_client.xadd("vision_events", ev, maxlen=100)
+                    redis_client.xadd("vision_events", ev, maxlen=10000)
                 except Exception:
                     pass
 

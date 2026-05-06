@@ -189,9 +189,9 @@ services:
 #      retries: 20
 #      start_period: 900s
 
-  # 6. Vision Service (Sentinel Mode + Dashboard)
-  vision-service:
-    container_name: vision-service
+  # 6. Watchstander Service (Sentinel Mode + Dashboard)
+  watchstander:
+    container_name: watchstander
     build:
       context: .
       dockerfile: src/watchstander/Dockerfile.vision
@@ -214,7 +214,7 @@ services:
       - ./data/videos:/app/data/videos # For Local file testing
       - ./yolo26n.pt:/app/yolo26n.pt
       - ./src/watchstander/watchstander.py:/app/watchstander.py # Dev Mount
-      - ./scripts/web_dashboard.py:/app/web_dashboard.py # Dev Mount
+      - ./src/watchstander/web_dashboard.py:/app/web_dashboard.py # Dev Mount
     devices:
       - "/dev/video0:/dev/video0"
     networks:
@@ -252,6 +252,28 @@ services:
       - ./data/postgres:/var/lib/postgresql/data
     networks:
       - agent-net
+
+  # 11. Agent Orchestrator (FastAPI Daemon)
+  first-mate:
+    container_name: first-mate
+    build:
+      context: .
+      dockerfile: containers/orchestrator/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - L1_URI=http://front-end-service:8001/v1/chat/completions
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+    networks:
+      - agent-net
+    depends_on:
+      - front-end-service
+      - redis
 
   # 10. RTSP Simulator (Live YouTube Restreamer)
 #  rtsp-simulator:

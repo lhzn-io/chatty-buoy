@@ -109,7 +109,7 @@ ensure_service() {
 
 if [ "$ACTION" == "status" ]; then
     echo "📊 Stack Status (CORTEX_ENABLED=${CORTEX_ENABLED:-false}):"
-    SERVICES_TO_CHECK="redis postgres vision-service tts-service front-end-service cosmos-vision"
+    SERVICES_TO_CHECK="redis postgres watchstander tts-service front-end-service cosmos-vision first-mate"
     if [ "${CORTEX_ENABLED:-false}" == "true" ]; then
         SERVICES_TO_CHECK="$SERVICES_TO_CHECK cortex-service"
     fi
@@ -179,8 +179,9 @@ if [ "$ACTION" == "start" ]; then
 
     echo "🚀 Layer 1: Front-End"
     ensure_service "front-end-service" 300
-    ensure_service "vision-service" 300
+    ensure_service "watchstander" 300
     ensure_service "cosmos-vision" 300
+    ensure_service "first-mate" 300
 
     echo "🚀 Layer 3: Cortex"
     if [ "${CORTEX_ENABLED:-false}" == "true" ]; then

@@ -10,6 +10,7 @@ if [ -f .env ]; then
 fi
 
 STACK_ARGS=""
+AGENT_ARGS=""
 
 for arg in "$@"; do
     case $arg in
@@ -21,8 +22,11 @@ for arg in "$@"; do
             export CORTEX_ENABLED=false 
             STACK_ARGS="$STACK_ARGS --no-cortex"
             ;;
+        --silent)
+            AGENT_ARGS="$AGENT_ARGS --silent"
+            ;;
         --help|-h)
-            echo "Usage: $0 [--cortex|--no-cortex]"
+            echo "Usage: $0 [--cortex|--no-cortex] [--silent]"
             exit 0
             ;;
     esac
@@ -41,15 +45,17 @@ else
 fi
 
 # 2. Audio Reminder
-echo "---------------------------------------------------"
-echo "AUDIO CONFIG CHECK:"
-echo "Ensure 'Jabra Speak 710' is selected as Input in System Settings"
-echo "or run: wpctl set-default <ID>"
-echo "---------------------------------------------------"
+if [[ "$AGENT_ARGS" != *"--silent"* ]]; then
+    echo "---------------------------------------------------"
+    echo "AUDIO CONFIG CHECK:"
+    echo "Ensure 'Jabra Speak 710' is selected as Input in System Settings"
+    echo "or run: wpctl set-default <ID>"
+    echo "---------------------------------------------------"
+fi
 
 # 3. Features
 export ENABLE_RAG=true
 
-# 4. Run Agent
-echo "Launching Agent..."
-exec micromamba run -n chatty-buoy python -m src.orchestrator.agent_orchestrator
+# 4. Run Hardware Audio Client
+echo "Launching Hardware Audio Client..."
+exec micromamba run -n chatty-buoy python scripts/local_audio_cli.py $AGENT_ARGS
