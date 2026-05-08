@@ -266,6 +266,10 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - L1_URI=http://front-end-service:8001/v1/chat/completions
+      - ENABLE_RAG=true
+      - PG_HOST=postgres
+      - CORTEX_ENABLED=true
+      - CORTEX_BASE_URL=http://front-end-service:8001/v1
     volumes:
       - ./src:/app/src
       - ./logs:/app/logs

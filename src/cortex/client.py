@@ -21,7 +21,7 @@ class CortexClient:
         if not self.model:
             # vLLM exposes its loaded model name dynamically!
             models = await self.client.models.list()
-            self.model = models.data[0].id
+            self.model = os.environ.get('L1_MODEL', 'google/gemma-4-E4B-it')
         return self.model
 
     async def think(self, prompt: str) -> str:
@@ -36,7 +36,7 @@ class CortexClient:
             system_prompt = "You are Chatty-Buoy, a helpful AI crew member on a boat."
             
             # Fetch relevant documents using vector search
-            docs = await search_docs(prompt, top_k=3)
+            docs = await search_docs(prompt, top_k=1)
             
             if docs:
                 used_rag = True
@@ -52,7 +52,7 @@ class CortexClient:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=600,
+                max_tokens=250,
                 temperature=0.4
             )
             

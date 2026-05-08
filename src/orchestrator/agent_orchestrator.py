@@ -101,6 +101,21 @@ async def shutdown_event():
 async def health_check():
     return {"status": "healthy"}
 
+@app.get("/v1/events/stream")
+async def event_stream():
+    """SSE endpoint for outbound alerts, removing Redis dependency from clients."""
+    async def event_generator():
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe("outbound_chat")
+        try:
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    yield f"data: {message['data']}\n\n"
+        except asyncio.CancelledError:
+            await pubsub.unsubscribe("outbound_chat")
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 async def monitor_vision_stream():
     """Consumes vision events from Redis and updates state."""
     logger.info(f"Connecting to Redis Stream: {VISION_STREAM_KEY}")
@@ -122,15 +137,43 @@ async def monitor_vision_stream():
                         
                     bearing = float(data.get("bearing", 0))
                     rng = float(data.get("range", 1000))
-                    state.visual_context = f"CONTACT: {obj_class} at {bearing} deg, {rng}m."
+                    content = data.get("content", f"{obj_class} at {bearing} deg")
+                    state.visual_context = f"CONTACT: {obj_class} at {bearing} deg, {rng}m. Details: {content}"
                     
-                    if rng < 20 and obj_class in ['boat', 'ship']:
-                        # Proactive warning over redis out-of-band
-                        alert_msg = f"! COLLISION WARNING: {obj_class} at {bearing} deg, {rng} meters !"
-                        await redis_client.publish("outbound_chat", json.dumps({"text": alert_msg, "source": "agent"}))
+                    if state.vigilance_mode_active and content and len(content) > 10:
+                        logger.info(f"Vigilance mode triggered for contact: {content}")
+                        # Async fire-and-forget one-shot summary
+                        asyncio.create_task(summarize_and_alert_vigilance(content))
                         
         except Exception as e:
+            logger.error(f"Error in monitor_vision_stream: {e}")
             await asyncio.sleep(5)
+
+async def summarize_and_alert_vigilance(raw_contact_text: str):
+    """Hits the local L1 model to quickly summarize a camera event and blasts it out."""
+    logger.info(f"Summarizing vigilance contact: {raw_contact_text}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "model": L1_MODEL,
+                "messages": [
+                    {"role": "system", "content": f"You are {CHARACTER_NAME}, the first-mate of a maritime vessel. Provide a very fast, one-sentence punchy warning to the Captain about this camera contact. State only the facts of the contact. DO NOT include any role-playing filler like 'keep your eyes sharp' or 'captain'."},
+                    {"role": "user", "content": f"New camera contact: {raw_contact_text}"}
+                ],
+                "max_tokens": 50,
+                "temperature": 0.4
+            }
+            async with session.post(L1_URI, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    alert_msg = data['choices'][0]['message'].get('content', '').strip()
+                    if alert_msg:
+                        logger.info(f"Publishing vigilance alert: {alert_msg}")
+                        await redis_client.publish("outbound_chat", json.dumps({"text": alert_msg, "source": "agent"}))
+                else:
+                    logger.error(f"Vigilance L1 API error: {resp.status} - {await resp.text()}")
+    except Exception as e:
+        logger.error(f"Vigilance alert failed: {e}")
 
 async def execute_tool(tool_call: dict) -> str:
     """Executes predefined tools natively."""
@@ -140,10 +183,42 @@ async def execute_tool(tool_call: dict) -> str:
     if name == "get_current_time":
         from datetime import datetime
         return f"System Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+    elif name == "get_jetson_telemetry":
+        return sys_tools.get_report()
+        
+    elif name == "enable_vigilance_mode":
+        # Can publish to redis or handle state
+        try:
+            state.vigilance_mode_active = True
+            await redis_client.publish("vision_control", json.dumps({"command": "enable_vigilance"}))
+            return "Vigilance mode enabled. I will actively monitor the camera feed and report anomalies."
+        except Exception:
+            return "Failed to enable vigilance mode."
+            
+    elif name == "disable_vigilance_mode":
+        try:
+            state.vigilance_mode_active = False
+            await redis_client.publish("vision_control", json.dumps({"command": "disable_vigilance"}))
+            return "Vigilance mode disabled. I am standing down from active monitoring."
+        except Exception:
+            return "Failed to disable vigilance mode."
     
     elif name == "check_camera_feed":
         time_window_minutes = params.get("time_window_minutes", 0)
         report_type = params.get("report_type", "current")
+        
+        if report_type == "latest":
+            try:
+                events = await redis_client.xrevrange("vision_events", max="+", min="-", count=1)
+                if events:
+                    ev_id, ev_data = events[0]
+                    content = ev_data.get("content", "No details")
+                    return f"The most recent camera event recorded on the stream was: {content}\n\nSYSTEM INSTRUCTION: Provide a brief, conversational summary."
+                else:
+                    return "There are no recent camera events recorded on the stream."
+            except Exception:
+                return "Failed to fetch the latest camera event from the stream."
         
         if time_window_minutes:
             target_ms = int((time.time() - (time_window_minutes * 60)) * 1000)
@@ -187,6 +262,8 @@ async def execute_tool(tool_call: dict) -> str:
                 else:
                     output = f"Camera analysis: {new_analysis}"
                     
+                output += "\n\nSYSTEM INSTRUCTION: Provide a brief, conversational summary of this camera analysis. State only the facts. Do NOT read the full details and absolutely DO NOT append role-playing filler phrases or sign-offs at the end."
+                    
                 state.last_camera_analysis = new_analysis
                 return output
             except asyncio.TimeoutError:
@@ -195,16 +272,16 @@ async def execute_tool(tool_call: dict) -> str:
             return "Failed to communicate with camera system."
     return "Unknown Tool"
 
-async def _generate_transcript_bg(b64_audio: str, history_ref: dict):
-    """Out-of-band background task to get a transcript of the audio."""
-    await asyncio.sleep(1.5)
+async def _generate_transcript_sync(b64_audio: str) -> str:
+    """Synchronous out-of-band task to get a transcript of the audio before sending prompt."""
     try:
         async with aiohttp.ClientSession() as session:
             payload = {
                 "model": L1_MODEL,
                 "messages": [
+                    {"role": "system", "content": "You are a specialized multilingual speech-to-text API. Your ONLY objective is to transcribe the user's audio in the language spoken (e.g., English, Spanish, Italian). DO NOT answer questions. Output ONLY the exact transcription. If the audio contains only silence, background noise, or unintelligible sounds, output exactly NOTHING. Do not hallucinate transcripts from ambient noise."},
                     {"role": "user", "content": [
-                        {"type": "text", "text": "<|audio|>\nTranscribe the user's spoken audio perfectly. Output ONLY the exact text of what the user says."},
+                        {"type": "text", "text": "Transcribe the attached audio exactly as spoken in its original language. If it is just noise, output nothing."},
                         {"type": "input_audio", "input_audio": {"data": b64_audio, "format": "wav"}}
                     ]}
                 ],
@@ -216,18 +293,48 @@ async def _generate_transcript_bg(b64_audio: str, history_ref: dict):
                     data = await resp.json()
                     transcript = data['choices'][0]['message'].get('content', '').strip()
                     logger.info(f"📝 User (Transcribed): {transcript}")
-                    history_ref["content"] = f"[Transcribed Audio]: {transcript}"
+                    return transcript
                 else:
                     logger.error(f"Transcript generation failed: {await resp.text()}")
-                    history_ref["content"] = "[Transcribed Audio Failed]"
+                    return ""
     except Exception as e:
-        logger.error(f"Background Transcript Error: {e}")
-        history_ref["content"] = "[Transcribed Audio Failed]"
+        logger.error(f"Transcript Error: {e}")
+        return ""
+
+async def _check_directed_intent(text: str) -> bool:
+    """Fast semantic router to drop background conversation."""
+    lower_text = text.lower()
+    if any(hotword.lower() in lower_text for hotword in FAST_PATH_HOTWORDS):
+        logger.info(f"Intent Check (Fast Path): Bypassed for '{text}'")
+        return True
+        
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "model": L1_MODEL,
+                "messages": [
+                    {"role": "system", "content": "Analyze the following short speech transcript. Is the user explicitly addressing an AI assistant, asking a direct command/question, or seeking help? Or does it look like casual background conversation/muttering not meant for you? Answer strictly YES (if addressed to you/command) or NO (if background chat)."},
+                    {"role": "user", "content": text}
+                ],
+                "max_tokens": 5,
+                "temperature": 0.0
+            }
+            async with session.post(L1_URI, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    result = data['choices'][0]['message'].get('content', '').strip().upper()
+                    is_directed = "YES" in result
+                    logger.info(f"Intent Check: {result} for '{text}'")
+                    return is_directed
+    except Exception as e:
+        logger.error(f"Intent Error: {e}")
+    return True
 
 class ChatRequest(BaseModel):
     model: str = L1_MODEL
     messages: List[Dict[str, Any]]
     stream: bool = False
+    enable_intent_filter: bool = False
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
@@ -239,14 +346,31 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
     state.history.append(req.messages[-1])
     history_ref = state.history[-1]
 
-    # Queue background transcription if audio is present
+    # Transcribe audio if present, converting to a text-only history frame
+    is_audio = False
     if isinstance(last_content, list):
         for part in last_content:
             if part.get("type") == "input_audio":
+                is_audio = True
                 b64_audio = part.get("input_audio", {}).get("data")
                 if b64_audio:
-                    background_tasks.add_task(_generate_transcript_bg, b64_audio, history_ref)
+                    transcript = await _generate_transcript_sync(b64_audio)
+                    if transcript:
+                        user_msg_text = transcript
+                        history_ref["content"] = transcript
+                    else:
+                        state.history.pop()  # Drop silent audio requests silently
+                        async def empty_stream(): yield "data: [DONE]\n\n"
+                        return StreamingResponse(empty_stream(), media_type="text/event-stream")
                 break
+                
+    if is_audio and req.enable_intent_filter and user_msg_text:
+        is_directed = await _check_directed_intent(user_msg_text)
+        if not is_directed:
+            logger.info("Dropping background speech.")
+            state.history.pop()
+            async def empty_stream(): yield "data: [DONE]\n\n"
+            return StreamingResponse(empty_stream(), media_type="text/event-stream")
     
     system_context = []
     if "status" in user_msg_text.lower():
@@ -269,10 +393,14 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
     messages_out = [system_msg] + state.history
 
     async def stream_generator():
+        if isinstance(last_content, list) and any(part.get("type") == "input_audio" for part in last_content):
+            yield f"data: {json.dumps({'type': 'transcript', 'text': user_msg_text})}\n\n"
+            
         async with aiohttp.ClientSession() as session:
             # 1. First Pass
             full_resp = ""
             tool_calls_buffer = {}
+            current_sent = ""
             
             async with session.post(L1_URI, json={
                 "model": L1_MODEL, 
@@ -302,12 +430,53 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                             continue
                         
                         delta = payload.get('content', '')
-                        if delta:
-                            full_resp += delta
-                            # Emit chunk to client natively
-                            chunk_data = json.dumps({"choices": [{"delta": {"content": delta}}]})
+                        if not delta: continue
+                        
+                        full_resp += delta
+                        current_sent += delta
+                        
+                        # Strip fully-formed tags from current buffer
+                        current_sent = re.sub(r'<\|?tool_call>.*?(?:<tool_call\|?>|</tool_call>)', '', current_sent, flags=re.DOTALL | re.IGNORECASE)
+                        current_sent = re.sub(r'<call:[^>]+>', '', current_sent, flags=re.IGNORECASE)
+                        for tag in ['think', 'thought', 'TOOL', 'PLAN', 'LOOKUP']:
+                            current_sent = re.sub(rf'<{tag}>.*?</{tag}>', '', current_sent, flags=re.DOTALL | re.IGNORECASE)
+                        
+                        # Stop yielding if we might be in the middle of a tag
+                        if re.search(r'<\|?tool_call>(?!.*?(?:<tool_call\|?>|</tool_call>))', current_sent, flags=re.DOTALL | re.IGNORECASE):
+                            continue
+                        if re.search(r'<call:[^>]*$', current_sent, flags=re.IGNORECASE):
+                            continue
+                        if re.search(r'<(?:think|thought|TOOL|PLAN|LOOKUP)>(?!.*?</(?:think|thought|TOOL|PLAN|LOOKUP)>)', current_sent, flags=re.DOTALL | re.IGNORECASE):
+                            continue
+                        
+                        # If safe, yield it and clear current_sent so we don't repeat
+                        if current_sent:
+                            chunk_data = json.dumps({"choices": [{"delta": {"content": current_sent}}]})
                             yield f"data: {chunk_data}\n\n"
+                            current_sent = ""
                             
+            # If after the loop we still have `<call:` in full_resp, we need to parse it to tool_calls_buffer 
+            raw_tool_match = (
+                re.search(r'<\|?tool_call>\s*call:\s*([a-zA-Z0-9_]+)\s*(\{.*?\})\s*(?:<tool_call\|?>|</tool_call>)', full_resp, flags=re.DOTALL | re.IGNORECASE) or
+                re.search(r'<call>\s*([a-zA-Z0-9_]+)\s*(\{.*?\})\s*</call>', full_resp, flags=re.DOTALL | re.IGNORECASE) or
+                re.search(r'<call:([a-zA-Z0-9_]+)\s*(\{.*?\})\s*/?>', full_resp, flags=re.DOTALL | re.IGNORECASE)
+            ) if full_resp else None
+            
+            if raw_tool_match and not tool_calls_buffer:
+                func_name = raw_tool_match.group(1).strip()
+                func_args = raw_tool_match.group(2).strip()
+                tool_calls_buffer[0] = {
+                    "id": f"call_{len(state.history)}",
+                    "type": "function",
+                    "function": {
+                        "name": func_name,
+                        "arguments": func_args
+                    }
+                }
+            
+            lookup_match = re.search(r'<LOOKUP>(.*?)</LOOKUP>', full_resp, flags=re.IGNORECASE | re.DOTALL)
+            plan_match = re.search(r'<PLAN>(.*?)</PLAN>', full_resp, flags=re.IGNORECASE | re.DOTALL)
+            
             if tool_calls_buffer or ("<call:" in full_resp):
                 # Fallback extraction for Gemma native tags if not standard
                 if "<call:" in full_resp:
@@ -321,26 +490,67 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                     name = tc["function"]["name"]
                     args_str = tc["function"]["arguments"]
                     try:
-                        args = json.loads(args_str)
-                    except: args = {}
+                        args_str_clean = args_str.replace('<|"|>', '"')
+                        args_str_clean = re.sub(r'([a-zA-Z0-9_]+):', r'"\1":', args_str_clean) # naive fix for unquoted keys
+                        args = json.loads(args_str_clean)
+                        tc["function"]["arguments"] = json.dumps(args)
+                    except: 
+                        args = {}
+                        tc["function"]["arguments"] = "{}"
                     
                     logger.info(f"Executing native tool {name} with args {args}")
                     
-                    # Hack: Notify user about tool call inline in streaming
-                    content_str = f"\n_[Calling Tool: {name}]_\n"
-                    yield f"data: {json.dumps({'choices': [{'delta': {'content': content_str}}]})}\n\n"
+                    # Heartbeat Loop
+                    import random
+                    import asyncio
+                    default_msgs = [
+                        "Still digging through the archives, Captain...",
+                        "Consulting the navigation manuals, just a moment...",
+                        "Cross-referencing the database now, stand by...",
+                        "Still crunching the data...",
+                        "Processing those coordinates now, bear with me...",
+                        "I'm correlating the ship's logs, give me a second...",
+                        "Fetching those details from the lower decks...",
+                        "Hold fast, Captain, I'm pulling those records...",
+                        "Almost there, formatting the report now...",
+                        "Validating the charts, hold on..."
+                    ]
                     
-                    res = await execute_tool({"name": name, "parameters": args})
+                    tool_task = asyncio.create_task(execute_tool({"name": name, "parameters": args}))
+                    
+                    is_long_running = (name == "check_camera_feed" and args.get("report_type") != "latest")
+                    
+                    if is_long_running:
+                        # Initial heartbeat
+                        content_str = "Checking on that, Captain. "
+                        yield f"data: {json.dumps({'choices': [{'delta': {'content': content_str}}]})}\n\n"
+                    
+                    while not tool_task.done():
+                        done, pending = await asyncio.wait([tool_task], timeout=8.0)
+                        if tool_task in done:
+                            res = tool_task.result()
+                            break
+                        # Yield a heartbeat message so TTS speaks it while waiting
+                        if is_long_running:
+                            msg = random.choice(default_msgs) + " "
+                            yield f"data: {json.dumps({'choices': [{'delta': {'content': msg}}]})}\n\n"
+                        
                     tool_results.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
+                        "name": name,
                         "content": res
                     })
                 
                 # Recursive Call!
+                # Clean up full_resp so it doesn't pollute the prompt
+                clean_resp = full_resp
+                clean_resp = re.sub(r'<\|?tool_call>.*?(?:<tool_call\|?>|</tool_call>)', '', clean_resp, flags=re.DOTALL | re.IGNORECASE)
+                clean_resp = re.sub(r'<call:[^>]+>', '', clean_resp, flags=re.IGNORECASE)
+                
                 state.history.append({
                     "role": "assistant",
-                    "content": full_resp,
+                    "content": clean_resp.strip(),
                     "tool_calls": list(tool_calls_buffer.values())
                 })
                 
@@ -362,10 +572,43 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                             payload = json.loads(line[6:])['choices'][0]['delta']
                             delta = payload.get('content', '')
                             if delta:
-                                state.history[-1] = {"role": "assistant", "content": state.history[-1].get("content","")+delta} if (len(state.history) > 0 and state.history[-1].get("role")=="assistant") else {"role": "assistant", "content": delta}
+                                if len(state.history) > 0 and state.history[-1].get("role") == "assistant" and "tool_calls" not in state.history[-1]:
+                                    state.history[-1]["content"] += delta
+                                else:
+                                    state.history.append({"role": "assistant", "content": delta})
                                 chunk_data = json.dumps({"choices": [{"delta": {"content": delta}}]})
                                 yield f"data: {chunk_data}\n\n"
                                 
+            elif lookup_match or plan_match:
+                # Handle RAG Lookup
+                quick_query = (lookup_match or plan_match).group(1).strip()
+                logger.info(f"⚡ L1 Tactical Reference Lookup: '{quick_query}'")
+                
+                # Let user know something is happening
+                content_str = "\n_[Consulting the ship's manuals...]_\n"
+                yield f"data: {json.dumps({'choices': [{'delta': {'content': content_str}}]})}\n\n"
+                
+                cortex_client = CortexClient(base_url="http://front-end-service:8001/v1")
+                cortex_resp = await cortex_client.think(quick_query)
+                
+                clean_resp = full_resp
+                clean_resp = re.sub(r'<(?:think|thought|TOOL|PLAN|LOOKUP)>.*?</(?:think|thought|TOOL|PLAN|LOOKUP)>', '', clean_resp, flags=re.DOTALL | re.IGNORECASE)
+                
+                state.history.append({"role": "assistant", "content": clean_resp.strip()})
+                
+                import asyncio
+                if len(state.history) > 0 and state.history[-1].get("role") == "assistant":
+                    state.history[-1]["content"] += "\n"
+                else:
+                    state.history.append({"role": "assistant", "content": "\n"})
+
+                chunk_size = 20
+                for i in range(0, len(cortex_resp), chunk_size):
+                    chunk = cortex_resp[i:i+chunk_size]
+                    state.history[-1]["content"] += chunk
+                    yield f"data: {json.dumps({'choices': [{'delta': {'content': chunk}}]})}\n\n"
+                    await asyncio.sleep(0.01)
+
             else:
                 state.history.append({"role": "assistant", "content": full_resp})
 
