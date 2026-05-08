@@ -52,7 +52,7 @@ class CortexClient:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=250,
+                max_tokens=800,
                 temperature=0.4
             )
             
