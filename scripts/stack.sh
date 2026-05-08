@@ -204,10 +204,11 @@ if [ "$ACTION" == "verify" ]; then
         ["TTS (Chatterbox)"]="http://localhost:8003/health"
         ["Vision (Sentinel Dashboard)"]="http://localhost:8080"
         ["Cosmos Vision)="]="http://localhost:8010/v1/models"
+        ["First-Mate (Orchestrator)"]="http://localhost:8000/health"
     )
     
     if [ "${CORTEX_ENABLED:-false}" == "true" ]; then
-        SERVICES["Cortex (L3)"]="http://localhost:8000/health"
+        SERVICES["Cortex (L3)"]="http://localhost:8005/health"
     else
         echo "💡 Skipping Cortex verification (Disabled mode)."
     fi

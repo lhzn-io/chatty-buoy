@@ -17,7 +17,7 @@ DB_CONFIG = {
     "user": "agent",
     "password": "agentbufferpassword",
     "database": "agent_memory",
-    "host": "localhost",
+    "host": os.environ.get("PG_HOST", "localhost"),
     "port": 5432
 }
 PDF_DIR = "./pdfs"

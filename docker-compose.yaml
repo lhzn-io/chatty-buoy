@@ -45,10 +45,8 @@ services:
       - CUDA_VISIBLE_DEVICES=0
       - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
-      #- VOICE_REF_FILE=quint-processed.wav
-      #- VOICE_REF_FILE=ahab-life-amid-mild-seas.wav
-      - VOICE_REF_FILE=jerry_seinfeld_prompt.wav
-      #- VOICE_REF_FILE=dwight_prompt.wav
+      - VOICE_REF_FILE=quint1.wav
+      #- VOICE_REF_FILE=jerry_seinfeld_prompt.wav
     volumes:
       - ./config:/app/config
       - ./src/voice:/app/src/voice

@@ -69,8 +69,8 @@ CAMERA_TOOL = {
                 },
                 "report_type": {
                     "type": "string",
-                    "enum": ["current", "diff", "summary"],
-                    "description": "Optional. Type of report. 'current' simply checks right now. 'diff' identifies and isolates the SINGLE closest historical report to the requested time (to save context space). 'summary' dumps a bulk list of ALL events over the duration (WARNING: uses heavy context, prefer 'diff' whenever possible)."
+                    "enum": ["current", "diff", "summary", "latest"],
+                    "description": "Optional. Type of report. 'current' takes a new photo and checks right now. 'latest' pulls the most recent existing camera event without taking a new photo. 'diff' identifies and isolates the SINGLE closest historical report to the requested time (to save context space). 'summary' dumps a bulk list of ALL events over the duration (WARNING: uses heavy context, prefer 'diff' whenever possible)."
                 }
             },
             "required": []
@@ -104,5 +104,5 @@ DISABLE_VIGILANCE_TOOL = {
     }
 }
 
-AVAILABLE_TOOLS = [SYSTEM_TOOL, NAV_TOOL, TIME_TOOL, CAMERA_TOOL, ENABLE_VIGILANCE_TOOL, DISABLE_VIGILANCE_TOOL]
+AVAILABLE_TOOLS = [SYSTEM_TOOL, TIME_TOOL, CAMERA_TOOL, ENABLE_VIGILANCE_TOOL, DISABLE_VIGILANCE_TOOL]
 

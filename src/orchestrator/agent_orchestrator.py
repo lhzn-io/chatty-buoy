@@ -135,10 +135,14 @@ async def monitor_vision_stream():
                         state.status_request_event.set()
                         continue
                         
-                    bearing = float(data.get("bearing", 0))
-                    rng = float(data.get("range", 1000))
-                    content = data.get("content", f"{obj_class} at {bearing} deg")
-                    state.visual_context = f"CONTACT: {obj_class} at {bearing} deg, {rng}m. Details: {content}"
+                    position = data.get("position", "unknown")
+                    distance = data.get("distance", "unknown")
+                    content = data.get("content", f"{obj_class} at {position}")
+                    
+                    if position != "unknown":
+                        state.visual_context = f"CONTACT: {obj_class} sitting {position}, {distance}. Details: {content}"
+                    else:
+                        state.visual_context = f"CONTACT: {obj_class}. Details: {content}"
                     
                     if state.vigilance_mode_active and content and len(content) > 10:
                         logger.info(f"Vigilance mode triggered for contact: {content}")
@@ -157,7 +161,13 @@ async def summarize_and_alert_vigilance(raw_contact_text: str):
             payload = {
                 "model": L1_MODEL,
                 "messages": [
-                    {"role": "system", "content": f"You are {CHARACTER_NAME}, the first-mate of a maritime vessel. Provide a very fast, one-sentence punchy warning to the Captain about this camera contact. State only the facts of the contact. DO NOT include any role-playing filler like 'keep your eyes sharp' or 'captain'."},
+                    {"role": "system", "content": (
+                        f"You are {CHARACTER_NAME}, the first-mate of a maritime vessel. "
+                        "Provide a very fast, one-sentence punchy warning to the Captain about this camera contact. "
+                        "State only the facts using relative maritime terms (port, starboard, ahead). "
+                        "ABSOLUTELY NO numeric bearings, degrees, or distances in meters. "
+                        "DO NOT include any role-playing filler like 'keep your eyes sharp' or 'captain'."
+                    )},
                     {"role": "user", "content": f"New camera contact: {raw_contact_text}"}
                 ],
                 "max_tokens": 50,
@@ -250,7 +260,7 @@ async def execute_tool(tool_call: dict) -> str:
             state.status_request_event.clear()
             await redis_client.publish("vision_control", json.dumps({"command": "analyze_scene"}))
             try:
-                await asyncio.wait_for(state.status_request_event.wait(), timeout=15.0)
+                await asyncio.wait_for(state.status_request_event.wait(), timeout=30.0)
                 new_analysis = state.status_request_result
                 
                 if time_window_minutes and report_type == "summary":
@@ -262,7 +272,12 @@ async def execute_tool(tool_call: dict) -> str:
                 else:
                     output = f"Camera analysis: {new_analysis}"
                     
-                output += "\n\nSYSTEM INSTRUCTION: Provide a brief, conversational summary of this camera analysis. State only the facts. Do NOT read the full details and absolutely DO NOT append role-playing filler phrases or sign-offs at the end."
+                output += (
+                    "\n\nSYSTEM INSTRUCTION: Provide a brief, conversational summary of this camera analysis. "
+                    "State only the facts using relative maritime terms (port, starboard, ahead). "
+                    "ABSOLUTELY NO numeric bearings, degrees, or distances in meters. "
+                    "Do NOT read the full details and absolutely DO NOT append role-playing filler phrases or sign-offs at the end."
+                )
                     
                 state.last_camera_analysis = new_analysis
                 return output
@@ -410,10 +425,14 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                 "max_tokens": 150, 
                 "temperature": 0.2
             }) as resp:
+                logger.info(f"🔍 FORENSICS: L1_REQ: {json.dumps(messages_out)}")
                 async for line in resp.content:
                     line = line.decode('utf-8').strip()
                     if line.startswith("data: ") and line != "data: [DONE]":
                         payload = json.loads(line[6:])['choices'][0]['delta']
+                        
+                        if 'content' in payload and payload['content']:
+                            logger.info(f"🔍 FORENSICS: L1_CHUNK: {payload['content']}")
                         
                         if 'tool_calls' in payload:
                             for tc in payload['tool_calls']:
@@ -441,7 +460,11 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                         for tag in ['think', 'thought', 'TOOL', 'PLAN', 'LOOKUP']:
                             current_sent = re.sub(rf'<{tag}>.*?</{tag}>', '', current_sent, flags=re.DOTALL | re.IGNORECASE)
                         
-                        # Stop yielding if we might be in the middle of a tag
+                        # Stop yielding if we might be in the middle of a suspect tag
+                        # We only block if the '<' is followed by common tag characters
+                        suspect_tag = re.search(r'<[a-zA-Z|!/]', current_sent[current_sent.rfind('<'):])
+                        if suspect_tag and '>' not in current_sent[current_sent.rfind('<'):]:
+                            continue
                         if re.search(r'<\|?tool_call>(?!.*?(?:<tool_call\|?>|</tool_call>))', current_sent, flags=re.DOTALL | re.IGNORECASE):
                             continue
                         if re.search(r'<call:[^>]*$', current_sent, flags=re.IGNORECASE):
@@ -451,6 +474,11 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                         
                         # If safe, yield it and clear current_sent so we don't repeat
                         if current_sent:
+                            # If it doesn't end in punctuation or space, keep buffering unless it's getting long
+                            # Note: Comma is excluded from trigger punctuation to prevent TTS segmenting pauses.
+                            if not re.search(r'[.!?\n\s]$', current_sent) and len(current_sent) < 50:
+                                continue
+                                
                             chunk_data = json.dumps({"choices": [{"delta": {"content": current_sent}}]})
                             yield f"data: {chunk_data}\n\n"
                             current_sent = ""
@@ -474,8 +502,19 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                     }
                 }
             
+            logger.info(f"FULL_RESP: {full_resp}")
             lookup_match = re.search(r'<LOOKUP>(.*?)</LOOKUP>', full_resp, flags=re.IGNORECASE | re.DOTALL)
             plan_match = re.search(r'<PLAN>(.*?)</PLAN>', full_resp, flags=re.IGNORECASE | re.DOTALL)
+            
+            # Broadening LOOKUP detection for irregular tags: <|tool_call|>call:LOOKUP ...
+            if not lookup_match and ("LOOKUP" in full_resp.upper()) and ("<" in full_resp):
+                raw_lookup = re.search(r'LOOKUP\s+(.*)', full_resp, flags=re.IGNORECASE)
+                if raw_lookup:
+                    # Synthetic match object
+                    class MockMatch:
+                        def __init__(self, val): self.val = val
+                        def group(self, i): return self.val
+                    lookup_match = MockMatch(raw_lookup.group(1).split('<')[0].strip())
             
             if tool_calls_buffer or ("<call:" in full_resp):
                 # Fallback extraction for Gemma native tags if not standard
@@ -504,36 +543,36 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                     import random
                     import asyncio
                     default_msgs = [
-                        "Still digging through the archives, Captain...",
-                        "Consulting the navigation manuals, just a moment...",
-                        "Cross-referencing the database now, stand by...",
+                        "Still digging through the archives Captain...",
+                        "Consulting the navigation manuals just a moment...",
+                        "Cross-referencing the database now stand by...",
                         "Still crunching the data...",
-                        "Processing those coordinates now, bear with me...",
-                        "I'm correlating the ship's logs, give me a second...",
+                        "Processing those coordinates now bear with me...",
+                        "I'm correlating the ship's logs give me a second...",
                         "Fetching those details from the lower decks...",
-                        "Hold fast, Captain, I'm pulling those records...",
-                        "Almost there, formatting the report now...",
-                        "Validating the charts, hold on..."
+                        "Hold fast Captain I'm pulling those records...",
+                        "Almost there formatting the report now...",
+                        "Validating the charts hold on...",
+                        "I'm keeping an eye on the horizon one moment...",
+                        "Scanning the waves for you Captain...",
+                        "Checking the optics now..."
                     ]
                     
                     tool_task = asyncio.create_task(execute_tool({"name": name, "parameters": args}))
                     
-                    is_long_running = (name == "check_camera_feed" and args.get("report_type") != "latest")
-                    
-                    if is_long_running:
-                        # Initial heartbeat
-                        content_str = "Checking on that, Captain. "
-                        yield f"data: {json.dumps({'choices': [{'delta': {'content': content_str}}]})}\n\n"
+                    # Initial heartbeat for all tools
+                    content_str = "Checking on that Captain. "
+                    yield f"data: {json.dumps({'choices': [{'delta': {'content': content_str}}]})}\n\n"
+                    logger.info(f"YIELDED HEARTBEAT: {content_str}")
                     
                     while not tool_task.done():
-                        done, pending = await asyncio.wait([tool_task], timeout=8.0)
+                        done, pending = await asyncio.wait([tool_task], timeout=4.0)
                         if tool_task in done:
                             res = tool_task.result()
                             break
-                        # Yield a heartbeat message so TTS speaks it while waiting
-                        if is_long_running:
-                            msg = random.choice(default_msgs) + " "
-                            yield f"data: {json.dumps({'choices': [{'delta': {'content': msg}}]})}\n\n"
+                        # Yield a random heartbeat message while waiting
+                        msg = random.choice(default_msgs) + " "
+                        yield f"data: {json.dumps({'choices': [{'delta': {'content': msg}}]})}\n\n"
                         
                     tool_results.append({
                         "role": "tool",
@@ -566,18 +605,30 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                     "max_tokens": 150,
                     "temperature": 0.2
                 }) as resp2:
+                    logger.info(f"🔍 FORENSICS: L1_RECURSIVE_REQ: {json.dumps(messages_out_2)}")
+                    current_sent_recursive = ""
                     async for line in resp2.content:
                         line = line.decode('utf-8').strip()
                         if line.startswith("data: ") and line != "data: [DONE]":
                             payload = json.loads(line[6:])['choices'][0]['delta']
                             delta = payload.get('content', '')
                             if delta:
+                                logger.info(f"🔍 FORENSICS: L1_RECURSIVE_CHUNK: {delta}")
                                 if len(state.history) > 0 and state.history[-1].get("role") == "assistant" and "tool_calls" not in state.history[-1]:
                                     state.history[-1]["content"] += delta
                                 else:
                                     state.history.append({"role": "assistant", "content": delta})
-                                chunk_data = json.dumps({"choices": [{"delta": {"content": delta}}]})
+                                
+                                current_sent_recursive += delta
+                                if not re.search(r'[.!?\n\s]$', current_sent_recursive) and len(current_sent_recursive) < 50:
+                                    continue
+                                
+                                chunk_data = json.dumps({"choices": [{"delta": {"content": current_sent_recursive}}]})
                                 yield f"data: {chunk_data}\n\n"
+                                current_sent_recursive = ""
+                    
+                    if current_sent_recursive:
+                        yield f"data: {json.dumps({'choices': [{'delta': {'content': current_sent_recursive}}]})}\n\n"
                                 
             elif lookup_match or plan_match:
                 # Handle RAG Lookup
@@ -585,29 +636,33 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                 logger.info(f"⚡ L1 Tactical Reference Lookup: '{quick_query}'")
                 
                 # Let user know something is happening
-                content_str = "\n_[Consulting the ship's manuals...]_\n"
+                content_str = "Checking on that Captain. "
                 yield f"data: {json.dumps({'choices': [{'delta': {'content': content_str}}]})}\n\n"
+                logger.info(f"YIELDED LOOKUP HEARTBEAT: {content_str}")
                 
                 cortex_client = CortexClient(base_url="http://front-end-service:8001/v1")
-                cortex_resp = await cortex_client.think(quick_query)
                 
                 clean_resp = full_resp
                 clean_resp = re.sub(r'<(?:think|thought|TOOL|PLAN|LOOKUP)>.*?</(?:think|thought|TOOL|PLAN|LOOKUP)>', '', clean_resp, flags=re.DOTALL | re.IGNORECASE)
+                state.history.append({"role": "assistant", "content": f"{clean_resp.strip()}\n"})
                 
-                state.history.append({"role": "assistant", "content": clean_resp.strip()})
+                current_sent_rag = ""
+                async for chunk in cortex_client.think_stream(quick_query):
+                    # Strip markdown for TTS/CLI on the fly
+                    clean_chunk = chunk.replace('*', '').replace('#', '').replace('_', '')
+                    if not clean_chunk: continue
+                    
+                    state.history[-1]["content"] += clean_chunk
+                    
+                    current_sent_rag += clean_chunk
+                    if not re.search(r'[.!?\n\s]$', current_sent_rag) and len(current_sent_rag) < 50:
+                        continue
+                        
+                    yield f"data: {json.dumps({'choices': [{'delta': {'content': current_sent_rag}}]})}\n\n"
+                    current_sent_rag = ""
                 
-                import asyncio
-                if len(state.history) > 0 and state.history[-1].get("role") == "assistant":
-                    state.history[-1]["content"] += "\n"
-                else:
-                    state.history.append({"role": "assistant", "content": "\n"})
-
-                chunk_size = 20
-                for i in range(0, len(cortex_resp), chunk_size):
-                    chunk = cortex_resp[i:i+chunk_size]
-                    state.history[-1]["content"] += chunk
-                    yield f"data: {json.dumps({'choices': [{'delta': {'content': chunk}}]})}\n\n"
-                    await asyncio.sleep(0.01)
+                if current_sent_rag:
+                    yield f"data: {json.dumps({'choices': [{'delta': {'content': current_sent_rag}}]})}\n\n"
 
             else:
                 state.history.append({"role": "assistant", "content": full_resp})

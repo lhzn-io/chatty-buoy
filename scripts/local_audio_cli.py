@@ -12,11 +12,15 @@ import numpy as np
 import onnxruntime
 import sounddevice as sd
 import requests
+import re
+import sys
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from src.cortex.api_client import ChattyBuoyClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] AudioClient: %(message)s")
 logger = logging.getLogger("HeadlessAudio")
 
-ORCHESTRATOR_URL = "http://localhost:8000/v1/chat/completions"
 TTS_URI = "http://localhost:8003/generate"
 
 HW_INPUT_RATE = 16000
@@ -81,6 +85,8 @@ class HardwareDaemon:
         self.current_out_pos = 0
         self.buffering = True
         self.min_buffer_size = 2
+        
+        self.api_client = ChattyBuoyClient()
 
     def input_callback(self, indata, frames, time_info, status):
         self.input_queue.put(bytes(indata))
@@ -144,6 +150,12 @@ class HardwareDaemon:
         self.output_stream.start()
         logger.info("Hardware Audio started.")
 
+        def alert_handler(text):
+            logger.info(f"🚨 Proactive Alert Received: {text}")
+            self.process_tts(text)
+
+        threading.Thread(target=self.api_client.listen_for_alerts, args=(alert_handler, self.interrupt_event), daemon=True).start()
+
     def run(self):
         self.start_audio()
         threading.Thread(target=self.audio_capture_loop, daemon=True).start()
@@ -174,9 +186,8 @@ class HardwareDaemon:
                     is_speech_active = True
                     logger.info("Speech started.")
                     audio_buffer = []
+                    self.interrupt_event.set() # ALWAYS interrupt any active backend fetch or ongoing TTS audio so old loops die
                 silence_frames = 0
-                if self.is_agent_speaking:
-                    self.interrupt_event.set()
             else:
                 if is_speech_active:
                     silence_frames += 1
@@ -191,60 +202,85 @@ class HardwareDaemon:
                                 wav_file.setframerate(SAMPLE_RATE)
                                 wav_file.writeframes(b"".join(audio_buffer))
                             
-                            b64_str = base64.b64encode(wav_io.getvalue()).decode("utf-8")
-                            threading.Thread(target=self.send_to_orchestrator, args=(b64_audio,), daemon=True).start()
+                            b64_audio = base64.b64encode(wav_io.getvalue()).decode("utf-8")
+                            req_start = time.perf_counter()
+                            threading.Thread(target=self.send_to_orchestrator, args=(b64_audio, req_start), daemon=True).start()
                             audio_buffer = []
             
             if is_speech_active or (silence_frames <= frames_to_silence and audio_buffer):
                 audio_buffer.append(chunk)
 
-    def process_tts(self, text):
+    def process_tts(self, text, is_first_sentence=False, req_start=None):
         if not text.strip(): return
         try:
+            tts_req_start = time.perf_counter()
             with requests.post(TTS_URI, json={"text": text, "tags": []}, stream=True) as resp:
                 if resp.status_code == 200:
-                    for chunk in resp.iter_content(chunk_size=4096):
+                    first_chunk_received = False
+                    for chunk in resp.iter_content(chunk_size=1024):
                         if self.interrupt_event.is_set(): break
                         if not chunk: continue
+                        if is_first_sentence and not first_chunk_received:
+                            tts_to_audio_time = time.perf_counter() - tts_req_start
+                            if req_start:
+                                total_latency = time.perf_counter() - req_start
+                                logger.info(f"⏱️ [Latency] TTS Generate TTFB: {tts_to_audio_time*1000:.1f}ms")
+                                logger.info(f"⏱️ [Latency] Total Pipeline (End of Speech -> Audio Out): {total_latency*1000:.1f}ms")
+                            first_chunk_received = True
                         resampled = self.resampler.resample(np.frombuffer(chunk, dtype=np.int16))
                         self.output_buffer.put(resampled)
         except Exception as e:
             logger.error(f"TTS Error: {e}")
 
-    def send_to_orchestrator(self, b64_audio):
+    def send_to_orchestrator(self, b64_audio, req_start):
         self.interrupt_event.clear()
-        try:
-            payload = {
-                "model": "google/gemma-4-E4B-it",
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "<|audio|>\nPlease listen to my audio and respond. Treat casual conversation, follow-up questions, and small talk as directed at you. If the request asks for complex multi-step planning or research, output ONLY <PLAN>search query</PLAN>."},
-                        {"type": "input_audio", "input_audio": {"data": b64_audio, "format": "wav"}}
-                    ]
-                }],
-                "stream": True
-            }
+        
+        tts_queue = queue.Queue()
+        
+        def tts_worker():
+            first_sent = True
+            while True:
+                sentence = tts_queue.get()
+                if sentence is None or self.interrupt_event.is_set():
+                    break
+                self.process_tts(sentence, is_first_sentence=first_sent, req_start=req_start)
+                first_sent = False
+
+        threading.Thread(target=tts_worker, daemon=True).start()
+
+        class StreamHandler:
+            def __init__(self):
+                self.buffer = ""
+            def on_first_token(self):
+                logger.info(f"⏱️ [Latency] Orchestrator First Token (TTFT): {(time.perf_counter() - req_start)*1000:.1f}ms")
+            def on_chunk(self, chunk):
+                print(chunk, end="", flush=True)
+                self.buffer += chunk
+                
+                # More aggressive sentence boundaries (comma, punctuation, newline)
+                match = re.search(r'([.!?,\n]\s+)', self.buffer)
+                if match:
+                    boundary_idx = match.end()
+                    sentence = self.buffer[:boundary_idx]
+                    self.buffer = self.buffer[boundary_idx:]
+                    if sentence.strip():
+                        tts_queue.put(sentence)
+
+        handler = StreamHandler()
+        self.api_client.stream_agent_response(
+            b64_audio=b64_audio,
+            callback_fn=handler.on_chunk,
+            interrupt_event=self.interrupt_event,
+            first_token_callback=handler.on_first_token,
+            transcript_callback=lambda text: print(f"\n🗣️ [Transcribed User]: {text}\n🤖 [Agent]: ", end="")
+        )
+        
+        # flush remaining
+        if handler.buffer.strip():
+            tts_queue.put(handler.buffer)
             
-            full_response = ""
-            with requests.post(ORCHESTRATOR_URL, json=payload, stream=True) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if line:
-                        line = line.decode('utf-8')
-                        if line.startswith("data: ") and line != "data: [DONE]":
-                            try:
-                                data = json.loads(line[6:])
-                                chunk = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                full_response += chunk
-                                # In a real implementation we would chunk sentence boundaries and TTS here.
-                                # For now, we will wait for completion or naive boundaries.
-                                print(chunk, end="", flush=True)
-                            except json.JSONDecodeError: pass
-                print()
-                self.process_tts(full_response)
-        except Exception as e:
-            logger.error(f"Error querying orchestrator: {e}")
+        tts_queue.put(None) # Signal worker to exit
 
 if __name__ == "__main__":
-    HardwareDaemon().run()
+    daemon = HardwareDaemon()
+    daemon.run()

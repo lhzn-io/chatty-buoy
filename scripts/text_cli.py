@@ -1,13 +1,22 @@
-import json
 import sys
-import requests
+import threading
 from prompt_toolkit import PromptSession
 from prompt_toolkit.patch_stdout import patch_stdout
+import os
+import sys
 
-ORCHESTRATOR_URL = "http://localhost:8000/v1/chat/completions"
+# Ensure src is in python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from src.cortex.api_client import ChattyBuoyClient
 
 def main():
     print("📡 Connecting to Agent Orchestrator API (REST)...")
+    client = ChattyBuoyClient()
+    
+    def alert_callback(text):
+        print(f"\n🚨 [PROACTIVE ALERT]: {text}\nUser > ", end="", flush=True)
+        
+    threading.Thread(target=client.listen_for_alerts, args=(alert_callback,), daemon=True).start()
     
     session = PromptSession()
     
@@ -22,29 +31,11 @@ def main():
             if text.strip():
                 print("\n🤖 Agent > ", end="", flush=True)
                 
-                payload = {
-                    "model": "google/gemma-4-E4B-it",
-                    "messages": [{"role": "user", "content": text}],
-                    "stream": True
-                }
+                def print_chunk(chunk):
+                    print(chunk, end="", flush=True)
                 
-                try:
-                    response = requests.post(ORCHESTRATOR_URL, json=payload, stream=True)
-                    response.raise_for_status()
-                    
-                    for line in response.iter_lines():
-                        if line:
-                            line = line.decode('utf-8')
-                            if line.startswith("data: ") and line != "data: [DONE]":
-                                try:
-                                    data = json.loads(line[6:])
-                                    chunk = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    print(chunk, end="", flush=True)
-                                except json.JSONDecodeError:
-                                    pass
-                    print()
-                except requests.exceptions.RequestException as e:
-                    print(f"\n❌ Error connecting to Orchestrator: {e}")
+                client.stream_agent_response(text=text, callback_fn=print_chunk)
+                print()
                 
         except (KeyboardInterrupt, EOFError):
             break

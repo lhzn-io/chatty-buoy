@@ -92,8 +92,8 @@ def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary")
         data_uri = f"data:video/mp4;base64,{encoded_string}"
         
         logger.info("Submitting clip to Cosmos API...")
-        system_prompt = "You are Sentinel, an autonomous AI watchstander. Your duty is to continuously monitor video feeds, detect anomalies, track moving objects (especially people and vessels), and provide clear, structured situation reports. YOU MUST RESPOND STRICTLY IN ENGLISH."
-        user_prompt = "Observe this short video clip. Please provide:\n1. A detailed scene analysis.\n2. Any objects or people of interest.\n3. Anomaly detection (is anything out of the ordinary?).\nStructure your response clearly and explain your reasoning. DO NOT OUTPUT CHINESE CHARACTERS."
+        system_prompt = "You are Sentinel, an autonomous AI watchstander. Your duty is to continuously monitor video feeds, detect anomalies, track moving objects (especially people and vessels), and provide clear, structured situation reports. CRITICAL: This vessel DOES NOT have a heading sensor or compass. DO NOT hallucinate bearings, headings, or coordinates. Instead, describe positions relative to the camera frame using maritime terms: 'Port' (left), 'Starboard' (right), or 'Dead Ahead' (center). YOU MUST RESPOND STRICTLY IN ENGLISH."
+        user_prompt = "Observe this short video clip. Please provide:\n1. A detailed scene analysis.\n2. Any objects or people of interest (describe their position relative to our vessel: port, starboard, or ahead).\n3. Anomaly detection (is anything out of the ordinary?).\nStructure your response clearly and explain your reasoning. DO NOT OUTPUT CHINESE CHARACTERS."
         
         if redis_client:
             stored_sys = redis_client.get("prompt:cosmos:system")
@@ -224,10 +224,17 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
                 y_bottom = rect_params.top + rect_params.height
                 
                 norm_x = (x_center / frame_width) - 0.5
-                bearing = round(norm_x * 90, 1)
+                
+                # Use qualitative positions instead of hallucinated compass bearings
+                if norm_x < -0.15:
+                    bearing_desc = "port"
+                elif norm_x > 0.15:
+                    bearing_desc = "starboard"
+                else:
+                    bearing_desc = "dead ahead"
                 
                 norm_y = y_bottom / frame_height
-                rng = 1000 if norm_y < 0.2 else round(10 / (norm_y - 0.2), 1)
+                dist_desc = "distant" if norm_y < 0.4 else "close" if norm_y > 0.7 else "mid-range"
 
                 is_stationary = False
                 
@@ -260,10 +267,10 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
                 if should_publish:
                     event_data = {
                         "class": label,
-                        "bearing": bearing,
-                        "range": rng,
+                        "position": bearing_desc,
+                        "distance": dist_desc,
                         "heading_rel": 0.0,
-                        "nav_status": "in_range" if rng < 50 else "monitor",
+                        "nav_status": "in_range" if dist_desc == "close" else "monitor",
                         "timestamp": current_time,
                         "track_id": track_id,
                         "confidence": confidence

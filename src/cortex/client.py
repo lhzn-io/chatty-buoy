@@ -24,6 +24,39 @@ class CortexClient:
             self.model = os.environ.get('L1_MODEL', 'google/gemma-4-E4B-it')
         return self.model
 
+    async def think_stream(self, prompt: str):
+        """
+        Stream a prompt to the Cortex, augmented by RAG if applicable.
+        """
+        if not self.enabled:
+            yield "My deep reasoning cortex is currently disabled in constrained mode."
+            return
+
+        try:
+            system_prompt = "You are Chatty-Buoy, a helpful AI crew member on a boat."
+            docs = await search_docs(prompt, top_k=1)
+            if docs:
+                context_str = "\n\n".join([f"Source: {d['metadata']['source']} (Page {d['metadata']['page']})\n{d['content']}" for d in docs])
+                system_prompt += "\n\nUse the following reference knowledge to answer the user's query accurately.\n\n" + context_str
+            
+            model_tag = await self.get_model()
+            stream = await self.client.chat.completions.create(
+                model=model_tag,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=800,
+                temperature=0.4,
+                stream=True
+            )
+            async for chunk in stream:
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+        except Exception as e:
+            yield f"Cortex Stream Error: {e}"
+
     async def think(self, prompt: str) -> str:
         """
         Send a prompt to the Cortex and get a text response, augmented by RAG if applicable.
