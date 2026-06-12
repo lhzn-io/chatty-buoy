@@ -25,6 +25,9 @@ for arg in "$@"; do
         --silent)
             AGENT_ARGS="$AGENT_ARGS --silent"
             ;;
+        --force|-f)
+            STACK_ARGS="$STACK_ARGS --force"
+            ;;
         --help|-h)
             echo "Usage: $0 [--cortex|--no-cortex] [--silent]"
             exit 0
@@ -33,16 +36,9 @@ for arg in "$@"; do
 done
 
 # 1. Ensure Services are Up
-echo "Checking Docker Services..."
-CORTEX_RUNNING=$(docker ps -q -f name=cortex-service)
-FE_RUNNING=$(docker ps -q -f name=front-end-service)
+echo "Verifying Docker Stack..."
+./scripts/stack.sh start $STACK_ARGS
 
-if [ -z "$FE_RUNNING" ] || { [ "${CORTEX_ENABLED:-false}" == "true" ] && [ -z "$CORTEX_RUNNING" ]; }; then
-    echo "Starting Services using stack controller..."
-    ./scripts/stack.sh start $STACK_ARGS
-else
-    echo "Services are running."
-fi
 
 # 2. Audio Reminder
 if [[ "$AGENT_ARGS" != *"--silent"* ]]; then

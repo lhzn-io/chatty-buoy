@@ -14,7 +14,9 @@ def main():
     client = ChattyBuoyClient()
     
     def alert_callback(text):
-        print(f"\n🚨 [PROACTIVE ALERT]: {text}\nUser > ", end="", flush=True)
+        # Strip tags for alert printing
+        clean_text = text.replace("<cite>", "").replace("</cite>", "")
+        print(f"\n🚨 [PROACTIVE ALERT]: {clean_text}\nUser > ", end="", flush=True)
         
     threading.Thread(target=client.listen_for_alerts, args=(alert_callback,), daemon=True).start()
     
@@ -32,7 +34,9 @@ def main():
                 print("\n🤖 Agent > ", end="", flush=True)
                 
                 def print_chunk(chunk):
-                    print(chunk, end="", flush=True)
+                    # Strip tags but keep content in text mode
+                    clean = chunk.replace("<cite>", "").replace("</cite>", "")
+                    print(clean, end="", flush=True)
                 
                 client.stream_agent_response(text=text, callback_fn=print_chunk)
                 print()

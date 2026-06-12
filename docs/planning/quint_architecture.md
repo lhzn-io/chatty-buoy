@@ -1,29 +1,24 @@
 # Captain & Quartermaster: Architecture Roadmap
 
-**Version:** 2.0 (Async Cascade)
-**Date:** 2026-02-10
+**Version:** 3.0 (Native NVFP4 Convergence)
+**Date:** 2026-06-12
 **Target Hardware:** Jetson Thor (Blackwell GPU)
 
-## 1. Vision: "The Async Cascade"
+## 1. Vision: "The NVFP4 Convergence"
 
-We have evolved from the synchronous "Parallel Brain" concept to the **Async Cascade** architecture. This design solves the latency-vs-intelligence trade-off by decoupling **Engagement** (Chat) from **Action** (Tools/Reasoning), allowing "Quint" (Chatty Buoy) to provide sub-100ms conversational latency while asynchronously performing complex reasoning and tool execution.
+We have evolved from the multi-layered "Async Cascade" concept to a **Converged Architecture**. By utilizing native NVFP4 4-bit precision on the Jetson Thor's Blackwell Tensor Cores, the massive `Gemma-4` architecture runs fast enough to handle immediate conversational interactions, native tool calling, and deep reasoning *simultaneously*, eliminating the need for a separate L3 Cortex.
 
 ### The Problem
-Standard agents block conversation while thinking or executing tools, creating awkward silence.
+Standard agents block conversation while thinking or executing tools. Previously, we solved this by cascading models (L1 for chat, L2 for tools, L3 for reasoning).
 ### The Solution
-We split the cognitive load into specific layers that run in parallel streams on the Jetson Thor:
-*   **The Face (L1):** Dedicated to immediate, fluid conversation.
-*   **The Hands (L2):** Dedicated to tool execution.
-*   **The Brain (L3):** Dedicated to deep reasoning and planning.
+We collapsed the cognitive load back into a single hyper-fast unified engine (Gemma-4-E4B-Multimodal NVFP4) which natively parses structured `<|tool_call>` outputs synchronously without dropping conversational latency.
 
-## 2. The Stack (4-Layer Model)
+## 2. The Stack (Converged Model)
 
 | Layer | Component | Model / Engine | Role | Latency |
 | :--- | :--- | :--- | :--- | :--- |
 | **L0** | **The Gatekeeper** | `Snowflake-Arctic-Embed-XS` | **Bouncer**: Router & Noise Filter. | < 10ms |
-| **L1** | **The Front-End** | `Gemma-3-4B-IT` | **Face**: Personality, Vision, Chat. | < 100ms |
-| **L2** | **The Dispatcher** | `FunctionGemma-270m` | **Hands**: Structured Tool Calling. | ~200ms |
-| **L3** | **The Cortex** | `Nemotron-3-30B` | **Brain**: Deep Reasoning & Planning. | 2-5s |
+| **L1** | **The Converged Engine** | `Gemma-4-E4B-Multimodal` | **Unified Intelligence**: Personality, Native Tool Calling, and Deep Reasoning. | < 100ms |
 
 ### Layer Details
 
@@ -31,94 +26,46 @@ We split the cognitive load into specific layers that run in parallel streams on
 *   **Function:** Vector similarity search against a "Hot List".
 *   **Routes:**
     *   `ignore`: Background noise.
-    *   `engage`: Standard chat (Pass to L1).
-    *   `planning`: Complex mission request (Direct pass to L3).
+    *   `engage`: Standard chat and complex mission requests (Pass to L1).
 
-#### L1: The Front-End (Quint)
-*   **Function:** Fast, multimodal chat.
-*   **Behavior:** Acknowledges user immediately ("Checking that for you...") and *asynchronously* triggers L2 for data.
+#### L1: The Converged Engine (Quint)
+*   **Function:** Fast, multimodal chat and orchestration.
+*   **Behavior:** Acknowledges user immediately via asynchronous heartbeats while parsing natively emitted `<|tool_call>` boundaries. It executes tools, ingests output, and summarizes findings via a unified VLLM TensorRT-LLM backend.
 
-#### L2: The Dispatcher
-*   **Function:** Converts natural language to JSON tool calls.
-*   **Efficiency:** 270M parameters means instant execution on Thor.
+## 3. Data Flow
 
-#### L3: The Cortex
-*   **Function:**
-    1.  **Analysis**: Consumes tool outputs from L2 and generates a strategic update.
-    2.  **Planning**: Generates multi-step mission plans when triggered directly by L0.
-
-## 3. Data Flow & Modes
-
-### Mode A: Standard Chat (Async Fork)
-*User asks a question. L1 responds immediately. L2 fetches data. L3 analyzes and updates.*
+*User asks a question. L1 responds with heartbeats. L1 emits a tool call. Orchestrator executes tool and injects output into context. L1 finalizes response.*
 
 ```mermaid
 sequenceDiagram
     participant U as User
     participant G as L0: Gatekeeper
-    participant Q as L1: Quint (Front-End)
-    participant D as L2: Dispatcher
+    participant Q as L1: Quint (Gemma-4)
+    participant O as Orchestrator
     participant T as Tools
-    participant C as L3: Cortex
 
     U->>G: "Is there traffic?"
     G->>Q: Forward
     par Engagement
-        Q->>U: "Checking..." (TTS)
+        Q->>U: "Checking..." (TTS Heartbeat)
     and Execution
-        Q->>D: Signal
-        D->>T: get_ais_targets()
-        T-->>D: Data
-        D->>C: Analyze(Data)
-        C-->>Q: "Captain, I see two tankers..."
+        Q->>O: Emits <|tool_call>
+        O->>T: get_ais_targets()
+        T-->>O: Data
+        O->>Q: Inject Data
+        Q-->>U: "Captain, I see two tankers..."
     end
-```
-
-### Mode B: Planning Mode (Deep Thought)
-*User invokes hotword ("Plan", "Mission"). L0 bypasses L1/L2. L3 takes full control.*
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant G as L0: Gatekeeper
-    participant C as L3: Cortex
-
-    U->>G: "Plan a mission to..."
-    G->>C: Direct Handoff
-    C->>C: Generate Multi-Step Plan
-    C->>U: "Acknowledged. Initiating Plan: 1..."
 ```
 
 ## 4. Hardware Considerations (Jetson Thor)
 *   **VRAM Strategy (Unified Memory):**
-    *   **Nemotron-30B (FP4):** ~18GB
-    *   **Gemma-3-4B (FP8):** ~5GB
-    *   **FunctionGemma (FP16):** ~0.6GB
-    *   **Context/KV Cache:** ~20GB
-    *   **Total Usage:** ~45GB / 128GB (Ample headroom for Vision).
+    *   **Gemma-4 (NVFP4):** ~20GB
+    *   **Cosmos Vision (FP8):** ~3GB
+    *   **Context/KV Cache:** ~10GB
+    *   **Total Usage:** ~33GB / 128GB (Ample headroom).
 
 ## 5. Implementation Roadmap
-
-### Phase 1: Foundation (Completed)
-*   [x] Container Infrastructure (Docker Compose).
-*   [x] Audio Pipeline (PulseAudio -> Riva ASR -> TTS).
-*   [x] Basic Orchestrator V1.
-
-### Phase 2: The Async Cascade (Completed)
-*   [x] **L2 Dispatcher**: Deployed `FunctionGemma-270m` service.
-*   [x] **L1 Front-End**: Deployed `Gemma-3-4B` service.
-*   [x] **Orchestrator V2**: Implemented Async Fork logic.
-*   [x] **L3 Integration**: Connected `Nemotron-30B` for reasoning.
-
-### Phase 3: Planning Capabilities (Completed)
-*   [x] **Hotword Router**: Added `planning` route to Gatekeeper.
-*   [x] **Meta-Planner**: Implemented direct L3 planning loop.
-
-### Phase 4: Vision & Multimodality (Next)
-*   [ ] **Camera Integration**: Feed RTSP/USB camera to L1 (Gemma-3).
-*   [ ] **Vision Tools**: Add object detection tools for L2.
-*   [ ] **Visual Reasoning**: Enable L3 to analyze scene descriptions.
-
-### Phase 5: Hardware Deployment
-*   [ ] **Jetson Thor Test**: Deploy containers to physical hardware.
-*   [ ] **Performance Tuning**: TensorRT-LLM optimization.
+*   [x] **NVFP4 Migration**: Upgraded container infrastructure and `agent_orchestrator.py` to use TensorRT-LLM and NVFP4.
+*   [x] **Native Tool Calling**: Removed `FunctionGemma-270m` and integrated Gemma-4 native tool parsing.
+*   [x] **Architecture Convergence**: Disabled Nemotron-30B (L3).
+*   [x] **Watchstander Dashboard**: Deployed containerized vision service with video playback and Sentinel telemetry on port 8080.

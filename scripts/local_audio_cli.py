@@ -21,8 +21,6 @@ from src.cortex.api_client import ChattyBuoyClient
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] AudioClient: %(message)s")
 logger = logging.getLogger("HeadlessAudio")
 
-TTS_URI = "http://localhost:8003/generate"
-
 HW_INPUT_RATE = 16000
 HW_OUTPUT_RATE = 48000
 SAMPLE_RATE = 16000
@@ -30,15 +28,21 @@ TTS_RATE = int(os.environ.get("TTS_SAMPLE_RATE", 24000))
 
 INPUT_CHUNK_SIZE = 512
 OUTPUT_CHUNK_SIZE = 1536
-VAD_THRESHOLD = 0.5
-SILENCE_DURATION_MS = 500
+VAD_THRESHOLD = 0.85  # Higher threshold to ignore background music/noise
+SILENCE_DURATION_MS = 500  # More responsive cutoff for cocktail party scenarios
 
 MODELS_DIR = "models"
 VAD_MODEL_PATH = os.path.join(MODELS_DIR, "silero_vad.onnx")
 
 class SileroVAD:
     def __init__(self, model_path):
-        self.session = onnxruntime.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        # Use CUDA for much lower CPU usage on AGX Thor
+        try:
+            self.session = onnxruntime.InferenceSession(model_path, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            logger.info("VAD using CUDAExecutionProvider")
+        except Exception:
+            self.session = onnxruntime.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+            logger.info("VAD using CPUExecutionProvider (fallback)")
         self.reset()
     def reset(self):
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
@@ -84,9 +88,13 @@ class HardwareDaemon:
         self.current_out_chunk = None
         self.current_out_pos = 0
         self.buffering = True
-        self.min_buffer_size = 2
+        self.min_buffer_size = 2 # Revert to 2 for faster playback start
+        self.startup_time = time.time()
+        self.grace_period = 5.0 # 5 seconds of non-interruptible greeting
         
-        self.api_client = ChattyBuoyClient()
+        orch_host = os.environ.get("ORCHESTRATOR_HOST", "localhost")
+        orch_port = int(os.environ.get("ORCHESTRATOR_PORT", 8000))
+        self.api_client = ChattyBuoyClient(orchestrator_host=orch_host, orchestrator_port=orch_port)
 
     def input_callback(self, indata, frames, time_info, status):
         self.input_queue.put(bytes(indata))
@@ -109,15 +117,17 @@ class HardwareDaemon:
             if self.current_out_chunk is None:
                 try:
                     if self.buffering:
-                         if self.output_buffer.qsize() >= self.min_buffer_size:
-                             self.buffering = False
-                         else:
-                             break
+                        if self.output_buffer.qsize() >= self.min_buffer_size:
+                            self.buffering = False
+                        else:
+                            break
                     self.current_out_chunk = self.output_buffer.get_nowait()
                     self.current_out_pos = 0
                     self.is_agent_speaking = True
                 except queue.Empty:
-                    if not self.buffering:
+                    # Don't set buffering=True here immediately, only if we are truly out of data
+                    # and didn't just finish a partial chunk.
+                    if frames_to_fill == frames: # We didn't even start filling
                         self.buffering = True
                     self.is_agent_speaking = False
                     break
@@ -136,12 +146,25 @@ class HardwareDaemon:
 
     def start_audio(self):
         jabra_idx = None
-        devices = sd.query_devices()
-        for i, dev in enumerate(devices):
-            if "jabra" in dev['name'].lower():
-                jabra_idx = i
-                break
+        logger.info("Searching for 'Jabra' audio device...")
         
+        while self.running and jabra_idx is None:
+            try:
+                devices = sd.query_devices()
+                for i, dev in enumerate(devices):
+                    if "jabra" in dev['name'].lower():
+                        jabra_idx = i
+                        logger.info(f"Found Jabra device at index {i}: {dev['name']}")
+                        break
+            except Exception as e:
+                logger.error(f"Error querying audio devices: {e}")
+            
+            if jabra_idx is None:
+                logger.warning("Jabra device not found. Retrying in 5s...")
+                time.sleep(5)
+        
+        if not self.running: return
+
         target_device = jabra_idx
         
         self.input_stream = sd.InputStream(device=target_device, samplerate=HW_INPUT_RATE, channels=1, dtype='int16', blocksize=INPUT_CHUNK_SIZE, callback=self.input_callback)
@@ -152,7 +175,9 @@ class HardwareDaemon:
 
         def alert_handler(text):
             logger.info(f"🚨 Proactive Alert Received: {text}")
-            self.process_tts(text)
+            # Strip tags for proactive alerts
+            clean_text = re.sub(r'<cite>.*?</cite>', '', text, flags=re.DOTALL)
+            self.process_tts(clean_text)
 
         threading.Thread(target=self.api_client.listen_for_alerts, args=(alert_handler, self.interrupt_event), daemon=True).start()
 
@@ -160,6 +185,48 @@ class HardwareDaemon:
         self.start_audio()
         threading.Thread(target=self.audio_capture_loop, daemon=True).start()
         logger.info("Listening... Speak into the microphone.")
+
+        # Wait for stack readiness before greeting
+        fe_host = os.environ.get("L1_HOST", "localhost")
+        tts_host = os.environ.get("TTS_HOST", "localhost")
+        fe_port = int(os.environ.get("L1_PORT", 8001))
+        tts_port = int(os.environ.get("TTS_PORT", 8003))
+        
+        fe_health_url = f"http://{fe_host}:{fe_port}/health"
+        tts_health_url = f"http://{tts_host}:{tts_port}/health"
+        
+        logger.info("Waiting for L1 Front-End and TTS services to be ready...")
+        fe_ready = False
+        tts_ready = False
+        
+        while self.running and (not fe_ready or not tts_ready):
+            if not fe_ready:
+                try:
+                    resp = requests.get(fe_health_url, timeout=2)
+                    if resp.status_code == 200:
+                        logger.info("L1 Front-End is READY.")
+                        fe_ready = True
+                except Exception:
+                    pass
+            
+            if not tts_ready:
+                try:
+                    resp = requests.get(tts_health_url, timeout=2)
+                    if resp.status_code == 200:
+                        logger.info("TTS Service is READY.")
+                        tts_ready = True
+                except Exception:
+                    pass
+            
+            if not fe_ready or not tts_ready:
+                time.sleep(5)
+
+        if self.running:
+            logger.info("Services ready. Starting main loop.")
+            # Initial greeting
+            greeting = "Ahoy there! I am Quint, your nautical assistant, what can I help you with today?"
+            threading.Thread(target=self.process_tts, args=(greeting,), daemon=True).start()
+
         try:
             while self.running:
                 time.sleep(1)
@@ -176,8 +243,12 @@ class HardwareDaemon:
         
         while self.running:
             try:
-                chunk = self.input_queue.get(timeout=1.0)
-            except queue.Empty: continue
+                # Use get_nowait + sleep to prevent tight-loop CPU spiking
+                # but keep latency low.
+                chunk = self.input_queue.get_nowait()
+            except queue.Empty: 
+                time.sleep(0.01)
+                continue
             
             prob = self.vad.process_chunk(np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0)
             
@@ -186,7 +257,9 @@ class HardwareDaemon:
                     is_speech_active = True
                     logger.info("Speech started.")
                     audio_buffer = []
-                    self.interrupt_event.set() # ALWAYS interrupt any active backend fetch or ongoing TTS audio so old loops die
+                    # Only interrupt if we are past the initial startup grace period
+                    if time.time() - self.startup_time > self.grace_period:
+                        self.interrupt_event.set() 
                 silence_frames = 0
             else:
                 if is_speech_active:
@@ -212,9 +285,14 @@ class HardwareDaemon:
 
     def process_tts(self, text, is_first_sentence=False, req_start=None):
         if not text.strip(): return
+        
+        tts_host = os.environ.get("TTS_HOST", "localhost")
+        tts_port = int(os.environ.get("TTS_PORT", 8003))
+        tts_url = f"http://{tts_host}:{tts_port}/generate"
+        
         try:
             tts_req_start = time.perf_counter()
-            with requests.post(TTS_URI, json={"text": text, "tags": []}, stream=True) as resp:
+            with requests.post(tts_url, json={"text": text, "tags": []}, stream=True) as resp:
                 if resp.status_code == 200:
                     first_chunk_received = False
                     for chunk in resp.iter_content(chunk_size=1024):
@@ -257,14 +335,21 @@ class HardwareDaemon:
                 print(chunk, end="", flush=True)
                 self.buffer += chunk
                 
+                # Create a version of the buffer with potential citation tags removed for boundary checking.
+                # We stop processing as soon as we see the start of a tag ('<') to be safe.
+                check_buffer = re.sub(r'<.*', '', self.buffer, flags=re.DOTALL)
+
                 # More aggressive sentence boundaries (comma, punctuation, newline)
-                match = re.search(r'([.!?,\n]\s+)', self.buffer)
+                match = re.search(r'([.!?,\n](\s+|$))', check_buffer)
                 if match:
                     boundary_idx = match.end()
                     sentence = self.buffer[:boundary_idx]
                     self.buffer = self.buffer[boundary_idx:]
                     if sentence.strip():
-                        tts_queue.put(sentence)
+                        # Strip <cite> tags and their content for audio
+                        clean_sentence = re.sub(r'<cite>.*?</cite>', '', sentence, flags=re.DOTALL)
+                        if clean_sentence.strip():
+                            tts_queue.put(clean_sentence)
 
         handler = StreamHandler()
         self.api_client.stream_agent_response(
@@ -277,7 +362,10 @@ class HardwareDaemon:
         
         # flush remaining
         if handler.buffer.strip():
-            tts_queue.put(handler.buffer)
+            # More robust stripping for final flush (handles unclosed tags)
+            clean_last = re.sub(r'<cite>.*?(</cite>|$)', '', handler.buffer, flags=re.DOTALL)
+            if clean_last.strip():
+                tts_queue.put(clean_last)
             
         tts_queue.put(None) # Signal worker to exit
 

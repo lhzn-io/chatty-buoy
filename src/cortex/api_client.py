@@ -57,10 +57,12 @@ class ChattyBuoyClient:
         }
 
         try:
-            with requests.post(self.orchestrator_url, json=payload, stream=True) as resp:
+            # Use a longer timeout for the streaming response itself, 
+            # but iter_lines will still block if the server is silent.
+            with requests.post(self.orchestrator_url, json=payload, stream=True, timeout=(5, 120)) as resp:
                 resp.raise_for_status()
                 first_token_received = False
-                for line in resp.iter_lines():
+                for line in resp.iter_lines(delimiter=b'\n'):
                     if interrupt_event and interrupt_event.is_set():
                         break
                     if line:

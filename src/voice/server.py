@@ -13,7 +13,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 import torch.nn.functional as F
 
-logging.basicConfig(level=logging.INFO)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
 logger = logging.getLogger("ChatterboxServer")
 
 torch.set_float32_matmul_precision('high')

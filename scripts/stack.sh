@@ -88,7 +88,7 @@ check_vram() {
 }
 
 kill_and_clean() {
-    echo "🛑 Stopping all services..."
+    echo "🛑 Stopping all Docker services..."
     docker compose down
     drop_caches
 }
@@ -99,8 +99,12 @@ ensure_service() {
     local status=$(get_status "$service")
     
     if [ "$status" == "healthy" ] || [ "$status" == "running" ]; then
-        echo "💡 $service is already running. Skipping."
+        echo "💡 $service is already running and healthy. Skipping."
     else
+        if [ "$status" == "unhealthy" ]; then
+            echo "⚠️  $service is UNHEALTHY. Forcing restart..."
+            docker compose stop "$service"
+        fi
         echo "🚀 Starting $service..."
         docker compose up -d "$service"
         wait_for_healthy "$service" "$timeout" || exit 1
@@ -109,7 +113,7 @@ ensure_service() {
 
 if [ "$ACTION" == "status" ]; then
     echo "📊 Stack Status (CORTEX_ENABLED=${CORTEX_ENABLED:-false}):"
-    SERVICES_TO_CHECK="redis postgres watchstander tts-service front-end-service cosmos-vision first-mate"
+    SERVICES_TO_CHECK="redis postgres watchstander tts-service front-end-service cosmos-vision first-mate audio-cli"
     if [ "${CORTEX_ENABLED:-false}" == "true" ]; then
         SERVICES_TO_CHECK="$SERVICES_TO_CHECK cortex-service"
     fi
@@ -182,6 +186,7 @@ if [ "$ACTION" == "start" ]; then
     ensure_service "watchstander" 300
     ensure_service "cosmos-vision" 300
     ensure_service "first-mate" 300
+    ensure_service "audio-cli" 60
 
     echo "🚀 Layer 3: Cortex"
     if [ "${CORTEX_ENABLED:-false}" == "true" ]; then
@@ -202,8 +207,8 @@ if [ "$ACTION" == "verify" ]; then
     SERVICES=(
         ["Front-End (L1)"]="http://localhost:8001/health"
         ["TTS (Chatterbox)"]="http://localhost:8003/health"
-        ["Vision (Sentinel Dashboard)"]="http://localhost:8080"
-        ["Cosmos Vision)="]="http://localhost:8010/v1/models"
+        ["Vision (Watchstander Dashboard)"]="http://localhost:8080"
+        ["Cosmos Vision"]="http://localhost:8010/v1/models"
         ["First-Mate (Orchestrator)"]="http://localhost:8000/health"
     )
     

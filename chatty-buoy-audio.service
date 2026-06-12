@@ -1,0 +1,20 @@
+[Unit]
+Description=Chatty Buoy Audio CLI Service
+After=docker.service network.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=lhzn
+Group=lhzn
+WorkingDirectory=/home/lhzn/Projects/lhzn-io/chatty-buoy
+ExecStart=/bin/bash /home/lhzn/Projects/lhzn-io/chatty-buoy/scripts/start_audio.sh --force
+Restart=always
+RestartSec=10
+Environment=PATH=/home/lhzn/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=MAMBA_ROOT_PREFIX=/home/lhzn/.micromamba
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

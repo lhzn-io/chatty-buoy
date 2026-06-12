@@ -46,6 +46,13 @@ class SharedState:
         self.status_request_result = "No status received."
         self.last_camera_analysis = None
         self.vigilance_event_queue = asyncio.Queue()
+        self.heartbeats = [
+            "Still analyzing the camera feed, it's taking a moment...",
+            "Analyzing the visual data on the Blackwell GPU...",
+            "The vision model is still processing the request...",
+            "Checking the nautical situation, please stand by..."
+        ]
+        self.initial_heartbeat = "Scanning the horizon for you."
 
 state = SharedState()
 redis_client = None
@@ -86,9 +93,23 @@ class SystemTools:
 
 sys_tools = SystemTools()
 
+def load_heartbeats():
+    """Load heartbeat phrases from config file."""
+    config_path = os.path.join("config", "heartbeats.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                state.heartbeats = config.get("heartbeats", state.heartbeats)
+                state.initial_heartbeat = config.get("initial", state.initial_heartbeat)
+                logger.info(f"Loaded {len(state.heartbeats)} heartbeat phrases.")
+        except Exception as e:
+            logger.error(f"Failed to load heartbeats: {e}")
+
 @app.on_event("startup")
 async def startup_event():
     global redis_client
+    load_heartbeats()
     redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
     asyncio.create_task(monitor_vision_stream())
 
@@ -122,15 +143,18 @@ async def monitor_vision_stream():
     last_id = "$"
     while True:
         try:
-            response = await redis_client.xread({VISION_STREAM_KEY: last_id}, count=1, block=100)
+            # logger.debug(f"XREAD from {VISION_STREAM_KEY} since {last_id}")
+            response = await redis_client.xread({VISION_STREAM_KEY: last_id}, count=50, block=100)
             if not response: continue
                 
             for stream, messages in response:
                 for message_id, data in messages:
                     last_id = message_id
                     obj_class = data.get("class", "object")
+                    logger.info(f"Processing vision event: {obj_class} ({message_id})")
                     
                     if obj_class == "status_request":
+                        logger.info("Received status_request result from Redis stream.")
                         state.status_request_result = data.get("content", "No clear view.")
                         state.status_request_event.set()
                         continue
@@ -150,28 +174,42 @@ async def monitor_vision_stream():
                         asyncio.create_task(summarize_and_alert_vigilance(content))
                         
         except Exception as e:
+            import traceback
             logger.error(f"Error in monitor_vision_stream: {e}")
+            logger.error(traceback.format_exc())
             await asyncio.sleep(5)
 
 async def summarize_and_alert_vigilance(raw_contact_text: str):
     """Hits the local L1 model to quickly summarize a camera event and blasts it out."""
     logger.info(f"Summarizing vigilance contact: {raw_contact_text}")
     try:
+        # Fetch latest event ID for citation
+        citation_url = ""
+        try:
+            events = await redis_client.xrevrange("vision_events", max="+", min="-", count=1)
+            if events:
+                ev_id = events[0][0]
+                citation_url = f"http://localhost:8080/#event-{ev_id}"
+        except Exception:
+            pass
+
         async with aiohttp.ClientSession() as session:
             payload = {
                 "model": L1_MODEL,
                 "messages": [
                     {"role": "system", "content": (
-                        f"You are {CHARACTER_NAME}, the first-mate of a maritime vessel. "
-                        "Provide a very fast, one-sentence punchy warning to the Captain about this camera contact. "
-                        "State only the facts using relative maritime terms (port, starboard, ahead). "
-                        "ABSOLUTELY NO numeric bearings, degrees, or distances in meters. "
-                        "DO NOT include any role-playing filler like 'keep your eyes sharp' or 'captain'."
+                        f"You are {CHARACTER_NAME}, a technical co-pilot. "
+                        "Describe this visual event in 1-2 plain, natural sentences. "
+                        "Do NOT use robotic language (no 'bipedal', 'entity', 'morphology', or 'vector'). "
+                        "Describe EXCATLY what is happening as if you were looking out the window. "
+                        "If it looks like a person, say 'person'. If it's a baseball game, say it's a baseball game. "
+                        "If a citation URL is provided, append it to the very end inside <cite> tags. "
+                        "Example: '<cite>http://...</cite>'"
                     )},
-                    {"role": "user", "content": f"New camera contact: {raw_contact_text}"}
+                    {"role": "user", "content": f"New event data: {raw_contact_text}\nCitation: <cite>{citation_url}</cite>" if citation_url else f"New event data: {raw_contact_text}"}
                 ],
-                "max_tokens": 50,
-                "temperature": 0.4
+                "max_tokens": 100,
+                "temperature": 0.5
             }
             async with session.post(L1_URI, json=payload) as resp:
                 if resp.status == 200:
@@ -217,6 +255,7 @@ async def execute_tool(tool_call: dict) -> str:
     elif name == "check_camera_feed":
         time_window_minutes = params.get("time_window_minutes", 0)
         report_type = params.get("report_type", "current")
+        specific_query = params.get("specific_query", "None.")
         
         if report_type == "latest":
             try:
@@ -224,7 +263,18 @@ async def execute_tool(tool_call: dict) -> str:
                 if events:
                     ev_id, ev_data = events[0]
                     content = ev_data.get("content", "No details")
-                    return f"The most recent camera event recorded on the stream was: {content}\n\nSYSTEM INSTRUCTION: Provide a brief, conversational summary."
+                    citation_url = f"http://localhost:8080/#event-{ev_id}"
+                    
+                    output = f"The most recent camera event recorded on the stream was: {content}\n\nSource: <cite>{citation_url}</cite>"
+                    output += (
+                        "\n\nSYSTEM INSTRUCTION: Provide a brief, conversational summary of this camera analysis. "
+                        "State only the facts using relative maritime terms (port, starboard, ahead). "
+                        "If a citation URL is provided, you MUST append it at the very end of your response inside <cite> tags. "
+                        "Example: '<cite>http://...</cite>'. "
+                        "ABSOLUTELY NO numeric bearings, degrees, or distances in meters. "
+                        "Do NOT read the full details and absolutely DO NOT append role-playing filler phrases or sign-offs at the end."
+                    )
+                    return output
                 else:
                     return "There are no recent camera events recorded on the stream."
             except Exception:
@@ -258,23 +308,54 @@ async def execute_tool(tool_call: dict) -> str:
                 
         try:
             state.status_request_event.clear()
-            await redis_client.publish("vision_control", json.dumps({"command": "analyze_scene"}))
+            
+            # Prepare state-aware payload
+            payload = {"command": "analyze_scene", "user_query": specific_query}
+            
+            # If we have a previous analysis, include it for diffing
+            if state.last_camera_analysis:
+                payload["previous_state"] = state.last_camera_analysis
+            else:
+                # Try to fetch the very last event from Redis as context if local state is empty
+                try:
+                    last_events = await redis_client.xrevrange("vision_events", max="+", min="-", count=1)
+                    if last_events:
+                        payload["previous_state"] = last_events[0][1].get("content", "Unknown")
+                except Exception:
+                    pass
+
+            await redis_client.publish("vision_control", json.dumps(payload))
             try:
-                await asyncio.wait_for(state.status_request_event.wait(), timeout=30.0)
+                await asyncio.wait_for(state.status_request_event.wait(), timeout=90.0)
                 new_analysis = state.status_request_result
                 
+                # Fetch the actual Redis event ID for citation
+                citation_url = ""
+                try:
+                    events = await redis_client.xrevrange("vision_events", max="+", min="-", count=1)
+                    if events:
+                        ev_id = events[0][0]
+                        citation_url = f"http://localhost:8080/#event-{ev_id}"
+                except Exception:
+                    pass
+
                 if time_window_minutes and report_type == "summary":
                     output = f"Current Camera analysis: {new_analysis}\n\nHistorical Camera Events (last {time_window_minutes} minutes):\n{historical_analysis}"
                 elif time_window_minutes and report_type in ["diff", "current"]:
-                    output = f"Current Camera analysis: {new_analysis}\n\nHistorical Camera analysis (~{time_window_minutes} minutes ago, for diffing): {historical_analysis}"
-                elif state.last_camera_analysis:
-                    output = f"Current Camera analysis: {new_analysis}\n\nPrevious Camera analysis (for diffing): {state.last_camera_analysis}"
+                    output = f"Current Camera analysis: {new_analysis}\n\nHistorical Camera analysis (~{time_window_minutes} minutes ago, for comparison): {historical_analysis}"
+                elif payload.get("previous_state"):
+                    output = f"Current Camera analysis: {new_analysis}\n\nPrevious Camera analysis (for comparison): {payload['previous_state']}"
                 else:
                     output = f"Camera analysis: {new_analysis}"
-                    
+                
+                if citation_url:
+                    output += f"\n\nSource: <cite>{citation_url}</cite>"
+
                 output += (
                     "\n\nSYSTEM INSTRUCTION: Provide a brief, conversational summary of this camera analysis. "
                     "State only the facts using relative maritime terms (port, starboard, ahead). "
+                    "If a citation URL is provided, you MUST append it at the very end of your response inside <cite> tags. "
+                    "Example: '<cite>http://...</cite>'. "
                     "ABSOLUTELY NO numeric bearings, degrees, or distances in meters. "
                     "Do NOT read the full details and absolutely DO NOT append role-playing filler phrases or sign-offs at the end."
                 )
@@ -282,10 +363,11 @@ async def execute_tool(tool_call: dict) -> str:
                 state.last_camera_analysis = new_analysis
                 return output
             except asyncio.TimeoutError:
-                return "Camera analysis request timed out."
-        except Exception:
-            return "Failed to communicate with camera system."
-    return "Unknown Tool"
+                return "The camera analysis timed out. I couldn't get a clear look."
+        except Exception as e:
+            logger.error(f"check_camera_feed failed: {e}")
+            return "I had trouble talking to the camera system."
+    return f"Tool {name} is not implemented natively."
 
 async def _generate_transcript_sync(b64_audio: str) -> str:
     """Synchronous out-of-band task to get a transcript of the audio before sending prompt."""
@@ -328,7 +410,13 @@ async def _check_directed_intent(text: str) -> bool:
             payload = {
                 "model": L1_MODEL,
                 "messages": [
-                    {"role": "system", "content": "Analyze the following short speech transcript. Is the user explicitly addressing an AI assistant, asking a direct command/question, or seeking help? Or does it look like casual background conversation/muttering not meant for you? Answer strictly YES (if addressed to you/command) or NO (if background chat)."},
+                    {"role": "system", "content": (
+                        "Analyze the following short speech transcript. Is the user explicitly addressing an AI assistant, "
+                        "asking a direct command or question (e.g. status, camera feeds, time, weather), or seeking technical help? "
+                        "Or does it look like purely casual background conversation, song lyrics, or muttering not meant for a system? "
+                        "Err on the side of YES if it looks like a request. "
+                        "Answer strictly YES (if addressed to you/command) or NO (if background chat)."
+                    )},
                     {"role": "user", "content": text}
                 ],
                 "max_tokens": 5,
@@ -395,13 +483,15 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
     
     sys_str = "\n".join(system_context)
     memory_block = f"\n[PREVIOUS SUMMARY]: {state.summary}" if state.summary else ""
+    vigilance_state = "ENABLED" if state.vigilance_mode_active else "DISABLED"
         
     system_msg = {
         "role": "system", 
         "content": L1_SYSTEM_PROMPT.format(
             current_time=time.strftime("%H:%M:%S"), 
             system_context=sys_str, 
-            memory_block=memory_block
+            memory_block=memory_block,
+            vigilance_state=vigilance_state
         )
     }
     
@@ -542,38 +632,29 @@ async def chat_completions(req: ChatRequest, background_tasks: BackgroundTasks):
                     # Heartbeat Loop
                     import random
                     import asyncio
-                    default_msgs = [
-                        "Still digging through the archives Captain...",
-                        "Consulting the navigation manuals just a moment...",
-                        "Cross-referencing the database now stand by...",
-                        "Still crunching the data...",
-                        "Processing those coordinates now bear with me...",
-                        "I'm correlating the ship's logs give me a second...",
-                        "Fetching those details from the lower decks...",
-                        "Hold fast Captain I'm pulling those records...",
-                        "Almost there formatting the report now...",
-                        "Validating the charts hold on...",
-                        "I'm keeping an eye on the horizon one moment...",
-                        "Scanning the waves for you Captain...",
-                        "Checking the optics now..."
-                    ]
-                    
+
                     tool_task = asyncio.create_task(execute_tool({"name": name, "parameters": args}))
+
+                    # Wait a short duration before sending a heartbeat
+                    # If the tool is fast (e.g. recall, time, telemetry), we skip the heartbeat entirely
+                    done, pending = await asyncio.wait([tool_task], timeout=0.5)
                     
-                    # Initial heartbeat for all tools
-                    content_str = "Checking on that Captain. "
-                    yield f"data: {json.dumps({'choices': [{'delta': {'content': content_str}}]})}\n\n"
-                    logger.info(f"YIELDED HEARTBEAT: {content_str}")
+                    if tool_task not in done:
+                        # Initial heartbeat for long-running tools
+                        content_str = state.initial_heartbeat + " "
+                        yield f"data: {json.dumps({'choices': [{'delta': {'content': content_str}}]})}\n\n"
+                        logger.info(f"YIELDED HEARTBEAT: {content_str}")
+
+                        while not tool_task.done():
+                            done, pending = await asyncio.wait([tool_task], timeout=4.0)
+                            if tool_task in done:
+                                break
+                            # Yield a random heartbeat message while waiting
+                            msg = random.choice(state.heartbeats) + " "
+                            yield f"data: {json.dumps({'choices': [{'delta': {'content': msg}}]})}\n\n"
+                            logger.info(f"YIELDED HEARTBEAT: {msg}")
                     
-                    while not tool_task.done():
-                        done, pending = await asyncio.wait([tool_task], timeout=4.0)
-                        if tool_task in done:
-                            res = tool_task.result()
-                            break
-                        # Yield a random heartbeat message while waiting
-                        msg = random.choice(default_msgs) + " "
-                        yield f"data: {json.dumps({'choices': [{'delta': {'content': msg}}]})}\n\n"
-                        
+                    res = await tool_task                        
                     tool_results.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],

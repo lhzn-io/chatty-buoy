@@ -33,6 +33,7 @@ services:
       context: .
       dockerfile: docker/voice/Dockerfile
     image: lhzn/chatterbox:thor
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\" || exit 1"]
       interval: 10s
@@ -46,10 +47,13 @@ services:
       - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
       - VOICE_REF_FILE=quint1.wav
+      - LOG_LEVEL=INFO
+      - HF_HUB_OFFLINE=1
       #- VOICE_REF_FILE=jerry_seinfeld_prompt.wav
     volumes:
       - ./config:/app/config
       - ./src/voice:/app/src/voice
+      - ~/.cache/huggingface:/root/.cache/huggingface
     ports:
       - "8003:8000"
     networks:
@@ -73,15 +77,17 @@ services:
       - CUDA_VISIBLE_DEVICES=0
       - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - HF_HOME=/root/.cache/huggingface
+      - HF_HUB_OFFLINE=1
     volumes:
       - ~/.cache/huggingface:/root/.cache/huggingface
     entrypoint: [
-      "vllm", "serve", "google/gemma-4-E4B-it",
+      "vllm", "serve", "/root/.cache/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/292a7e278a400932df35f9fd4b1501edd04133a5",
       "--gpu-memory-utilization", "0.15",
       "--max-model-len", "4096",
       "--enable-auto-tool-choice",
       "--reasoning-parser", "gemma4",
-        "--enforce-eager",
+      "--enforce-eager",
       "--tool-call-parser", "gemma4",
       "--host", "0.0.0.0",
       "--port", "8001"
@@ -115,8 +121,10 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=0
       - HF_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - HF_HOME=/data/models/huggingface
+      - HF_HUB_OFFLINE=1
     volumes:
-      - ~/.cache/huggingface/hub:/root/.cache/huggingface/hub:ro
+      - ~/.cache/huggingface:/data/models/huggingface
       - ~/.cache/vllm:/root/.cache/vllm
     entrypoint: [
       "vllm", "serve", "nvidia/Cosmos-Reason2-2B",
@@ -195,7 +203,7 @@ services:
       dockerfile: src/watchstander/Dockerfile.vision
     image: chatty-buoy/vision:latest
     runtime: nvidia
-    restart: always
+    restart: unless-stopped
     shm_size: '2gb'
     ports:
       - "8080:8080" # Web Dashboard
@@ -217,6 +225,11 @@ services:
       - "/dev/video0:/dev/video0"
     networks:
       - agent-net
+    depends_on:
+      cosmos-vision:
+        condition: service_healthy
+      redis:
+        condition: service_started
     deploy:
       resources:
         reservations:
@@ -264,6 +277,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - L1_URI=http://front-end-service:8001/v1/chat/completions
+      - L1_MODEL=/root/.cache/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/292a7e278a400932df35f9fd4b1501edd04133a5
       - ENABLE_RAG=true
       - PG_HOST=postgres
       - CORTEX_ENABLED=true
@@ -271,11 +285,49 @@ services:
     volumes:
       - ./src:/app/src
       - ./logs:/app/logs
+      - ./config:/app/config
+    networks:
+      - agent-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      front-end-service:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  # 12. Hardware Audio CLI
+  audio-cli:
+    container_name: audio-cli
+    build:
+      context: .
+      dockerfile: containers/audio/Dockerfile
+    restart: always
+    privileged: true
+    environment:
+      - ORCHESTRATOR_HOST=first-mate
+      - ORCHESTRATOR_PORT=8000
+      - L1_HOST=front-end-service
+      - L1_PORT=8001
+      - TTS_HOST=tts-service
+      - TTS_PORT=8000
+      - TTS_SAMPLE_RATE=24000
+    devices:
+      - "/dev/snd:/dev/snd"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./src:/app/src
+      - ./scripts:/app/scripts
+      - ./models:/app/models
     networks:
       - agent-net
     depends_on:
-      - front-end-service
-      - redis
+      - first-mate
+      - tts-service
 
   # 10. RTSP Simulator (Live YouTube Restreamer)
 #  rtsp-simulator:
