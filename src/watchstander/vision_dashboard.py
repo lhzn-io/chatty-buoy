@@ -58,7 +58,7 @@ def generate_layout(r_client):
 
     layout = Layout()
     layout.split_column(
-        Layout(Panel(Text("Sentinel Vision Dashboard", justify="center", style="bold cyan")), size=3),
+        Layout(Panel(Text("Watchstander Vision Dashboard", justify="center", style="bold cyan")), size=3),
         Layout(table)
     )
     return layout

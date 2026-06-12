@@ -2,13 +2,14 @@ import os
 import json
 import redis
 from datetime import datetime
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, send_from_directory
 
 app = Flask(__name__)
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_STREAM_KEY = "vision_events"
+VIDEO_DIR = "/app/data/videos"
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -16,7 +17,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sentinel Vision Dashboard</title>
+    <title>Watchstander Vision Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
@@ -33,13 +34,33 @@ HTML_TEMPLATE = """
         .markdown-body p { margin-bottom: 0.8rem; }
         .badge-custom { background-color: #e74c3c; font-size: 0.8rem; padding: 0.4em 0.8em; }
         .badge-time { background-color: #34495e; font-size: 0.8rem; }
+        .video-container { position: relative; cursor: pointer; }
+        .play-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.5);
+            color: white;
+            border-radius: 50%;
+            width: 80px;
+            height: 80px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 40px;
+            opacity: 0.8;
+            transition: opacity 0.3s;
+        }
+        .video-container:hover .play-overlay { opacity: 1; }
+        video { width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
     </style>
 </head>
 <body>
     <div class="dashboard-header">
         <div class="container">
             <div class="d-flex justify-content-between align-items-center">
-                <h2 class="m-0">Sentinel Vision Dashboard</h2>
+                <h2 class="m-0">Watchstander Vision Dashboard</h2>
                 <div>
                     <button class="btn btn-outline-light btn-sm me-3" onclick="triggerAnalyzeScene()" id="btnAnalyze">Analyze Scene</button>
                     <div class="spinner-grow spinner-grow-sm text-light" role="status" id="loadingIndicator">
@@ -125,7 +146,7 @@ HTML_TEMPLATE = """
                 });
         }
 
-        let currentFilter = 'status_request';
+        let currentFilter = 'all';
         let knownEventTypes = new Set(['status_request', 'contact_report', 'scene_summary', 'watchstander_report', 'sentry_telemetry', 'person', 'vessel']); // pre-populate some
         
         function applyFilter() {
@@ -175,27 +196,32 @@ HTML_TEMPLATE = """
                     if (currentFilter !== 'all') {
                         data = data.filter(e => e.class === currentFilter);
                     }
-                    
-                    container.innerHTML = ''; // Clear current
-
-                    if (data.length === 0) {
-                        container.innerHTML = `<div class="alert alert-warning border-0 shadow-sm">No events matching filter: ${currentFilter}</div>`;
-                        return;
-                    }
 
                     data.forEach(event => {
-                        const card = document.createElement('div');
+                        let card = document.getElementById(`event-${event.id}`);
+                        if (card) return; // Skip if already exists
+                        
+                        card = document.createElement('div');
                         card.className = 'card event-card';
+                        card.id = `event-${event.id}`;
                         
                         let detailsHtml = '';
 
                         if (['scene_summary', 'watchstander_report', 'status_request', 'contact_report'].includes(event.class)) {
                             detailsHtml = marked.parse(event.content);
                             if (event.image_base64) {
-                                detailsHtml += `<img src="data:image/jpeg;base64,${event.image_base64}" class="img-fluid rounded mt-3" style="max-height: 400px; border: 1px solid #ddd;" alt="Scene Snapshot"/>`;
+                                if (event.video_name) {
+                                    detailsHtml += `
+                                        <div class="video-container mt-3" id="vid-container-${event.id}" onclick="playVideo('${event.id}', '${event.video_name}')">
+                                            <img src="data:image/jpeg;base64,${event.image_base64}" class="img-fluid rounded" style="max-height: 800px; border: 1px solid #ddd;" alt="Scene Snapshot"/>
+                                            <div class="play-overlay">▶</div>
+                                        </div>
+                                    `;
+                                } else {
+                                    detailsHtml += `<img src="data:image/jpeg;base64,${event.image_base64}" class="img-fluid rounded mt-3" style="max-height: 800px; border: 1px solid #ddd;" alt="Scene Snapshot"/>`;
+                                }
                             }
                         } else if (event.class === 'sentry_telemetry') {
-
                             detailsHtml = `<p><strong>Telemetry:</strong> ${event.content}</p>`;
                         } else {
                             detailsHtml = `<p><strong>Bearing:</strong> ${event.bearing}° | <strong>Range:</strong> ${event.range}m | <strong>Nav Status:</strong> ${event.nav_status}</p>`;
@@ -213,10 +239,22 @@ HTML_TEMPLATE = """
                                 ${detailsHtml}
                             </div>
                         `;
-                        container.appendChild(card);
+                        // Insert at the top of container (newest first)
+                        container.insertBefore(card, container.firstChild);
                     });
                 })
                 .catch(error => console.error('Error fetching events:', error));
+        }
+
+        function playVideo(eventId, videoName) {
+            const container = document.getElementById(`vid-container-${eventId}`);
+            container.innerHTML = `
+                <video controls autoplay>
+                    <source src="/videos/${videoName}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            `;
+            container.onclick = null; // Remove click handler once playing
         }
 
         // Load immediately and poll every 3 seconds
@@ -325,6 +363,10 @@ def api_events():
             
             if parsed_event['class'] in ['scene_summary', 'watchstander_report', 'sentry_telemetry', 'status_request', 'contact_report']:
                 parsed_event['content'] = event_data.get('content', 'No content provided.')
+                # Extract filename from absolute path if available
+                video_path = event_data.get('video_path')
+                if video_path:
+                    parsed_event['video_name'] = os.path.basename(video_path)
             else:
                 parsed_event['bearing'] = event_data.get('bearing', '?')
                 parsed_event['range'] = event_data.get('range', '?')
@@ -339,6 +381,10 @@ def api_events():
         return jsonify(parsed_events)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route('/videos/<path:filename>')
+def serve_video(filename):
+    return send_from_directory(VIDEO_DIR, filename)
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=8080, debug=True)

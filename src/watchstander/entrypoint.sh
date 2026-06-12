@@ -24,7 +24,7 @@ else
     echo "Model found (/app/models/yolo26n.engine). Skipping export."
 fi
 
-echo "Starting Sentinel Dashboard in background..."
+echo "Starting Watchstander Dashboard in background..."
 python3 web_dashboard.py &
 
 echo "Starting Sentinel Pipeline (DeepStream)..."

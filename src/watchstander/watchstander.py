@@ -37,16 +37,18 @@ LAST_SENTINEL_TRIGGER = 0
 SENTINEL_COOLDOWN = int(os.environ.get("SENTINEL_COOLDOWN", 10))
 MAX_CACHED_VIDEOS = int(os.environ.get("MAX_CACHED_VIDEOS", 50))
 MANUAL_SENTINEL_TRIGGER = False
+MANUAL_PROMPT_OVERRIDE = {}
 
-def process_sentinel_video_delayed(fps, event_class):
+def process_sentinel_video_delayed(fps, event_class, prompt_overrides=None, delay=2.5):
     import time
-    # Give the object 2.5 seconds to pass through the frame before copying the buffer
-    time.sleep(2.5) 
+    # Give the object time to pass through the frame before copying the buffer
+    if delay > 0:
+        time.sleep(delay) 
     # Create a thread-safe snapshot of the buffer
     buffer_snapshot = list(FRAME_BUFFER)
-    process_sentinel_video(buffer_snapshot, fps, event_class)
+    process_sentinel_video(buffer_snapshot, fps, event_class, prompt_overrides)
 
-def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary"):
+def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary", prompt_overrides=None):
     if not buffer_snapshot or len(buffer_snapshot) < 10:
         return
         
@@ -58,23 +60,46 @@ def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary")
         import shutil
         import os
         
-        # Compile MP4 using cv2.VideoWriter natively
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        # Use XVID (mp4v) - much more stable for vLLM than MJPG
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v') 
         out = cv2.VideoWriter(tmp_file, fourcc, fps, (w, h))
+        
+        if not out.isOpened():
+            logger.warning("mp4v codec failed, falling back to MJPG")
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            out = cv2.VideoWriter(tmp_file, fourcc, fps, (w, h))
+        
         for f in buffer_snapshot:
             out.write(f)
         out.release()
-        
-        shutil.copy(tmp_file, debug_file)
-        logger.info(f"Saved debug clip to {debug_file}")
 
         # FIFO Cache for rolling clips
         import glob
         video_dir = "/app/data/videos"
         event_ts = int(time.time())
         historical_file = f"{video_dir}/event_{event_ts}.mp4"
-        shutil.copy(tmp_file, historical_file)
+
+        # Re-encode to H.264 for web compatibility using GStreamer CLI
+        web_tmp = "/tmp/sentinel_web.mp4"
+        import subprocess
+        # Pipeline: Decode -> Convert -> NV Hardware H.264 Encode -> Parse -> MP4 Mux -> File
+        # We use a faster hardware path
+        gst_cmd = f"gst-launch-1.0 filesrc location={tmp_file} ! decodebin ! videoconvert ! nvv4l2h264enc ! h264parse ! mp4mux ! filesink location={web_tmp}"
         
+        try:
+            logger.info("Re-encoding clip for web compatibility...")
+            subprocess.run(gst_cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            shutil.copy(web_tmp, debug_file)
+            shutil.copy(web_tmp, historical_file)
+            logger.info(f"Successfully encoded web-friendly clip to {historical_file}")
+            # Use the high-quality H264 clip for Cosmos too
+            cosmos_input_file = web_tmp
+        except Exception as e:
+            logger.error(f"Failed to re-encode video for web: {e}. Falling back to original.")
+            shutil.copy(tmp_file, debug_file)
+            shutil.copy(tmp_file, historical_file)
+            cosmos_input_file = tmp_file
+
         # Enforce FIFO limit
         if MAX_CACHED_VIDEOS > 0:
             cached_files = sorted(glob.glob(f"{video_dir}/event_*.mp4"), key=os.path.getmtime)
@@ -86,14 +111,35 @@ def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary")
                 except Exception as e:
                     logger.warning(f"Failed to remove {oldest_file}: {e}")
         
-        with open(tmp_file, "rb") as vf:
+        with open(cosmos_input_file, "rb") as vf:
             encoded_string = base64.b64encode(vf.read()).decode('utf-8')
             
         data_uri = f"data:video/mp4;base64,{encoded_string}"
         
         logger.info("Submitting clip to Cosmos API...")
-        system_prompt = "You are Sentinel, an autonomous AI watchstander. Your duty is to continuously monitor video feeds, detect anomalies, track moving objects (especially people and vessels), and provide clear, structured situation reports. CRITICAL: This vessel DOES NOT have a heading sensor or compass. DO NOT hallucinate bearings, headings, or coordinates. Instead, describe positions relative to the camera frame using maritime terms: 'Port' (left), 'Starboard' (right), or 'Dead Ahead' (center). YOU MUST RESPOND STRICTLY IN ENGLISH."
-        user_prompt = "Observe this short video clip. Please provide:\n1. A detailed scene analysis.\n2. Any objects or people of interest (describe their position relative to our vessel: port, starboard, or ahead).\n3. Anomaly detection (is anything out of the ordinary?).\nStructure your response clearly and explain your reasoning. DO NOT OUTPUT CHINESE CHARACTERS."
+
+        # Import prompts (usually they reside in the same repo structure)
+        # Note: In a containerized environment, we might need a relative import or a shared lib
+        try:
+             # Try to load from centralized prompts if available in the PYTHONPATH
+             from orchestrator.prompts import WATCHSTANDER_SYSTEM_PROMPT, WATCHSTANDER_USER_PROMPT_TEMPLATE
+             system_prompt = WATCHSTANDER_SYSTEM_PROMPT
+             
+             prev_state = "No previous context provided."
+             user_query = "None."
+             
+             if prompt_overrides:
+                 prev_state = prompt_overrides.get("previous_state", prev_state)
+                 user_query = prompt_overrides.get("user_query", user_query)
+             
+             user_prompt = WATCHSTANDER_USER_PROMPT_TEMPLATE.format(
+                 previous_state=prev_state,
+                 user_query=user_query
+             )
+        except ImportError:
+            # Fallback for standalone container deployment
+            system_prompt = "You are Sentinel, an autonomous AI watchstander. Your duty is to continuously monitor video feeds, detect anomalies, track moving objects (especially people and equipment), and provide clear, structured situation reports. CRITICAL: You do NOT have a heading sensor or compass. DO NOT hallucinate bearings, headings, or coordinates. Instead, describe positions relative to the camera frame using standard terms: 'Left', 'Right', or 'Center'. YOU MUST RESPOND STRICTLY IN ENGLISH."
+            user_prompt = "Observe this short video clip. Provide a professional, objective situation report. If no specific user request is present, provide a concise (2-3 sentence) summary of the current scene state, including key objects and their positions (Left/Right/Center). Focus on movement if present. DO NOT OUTPUT CHINESE CHARACTERS."
         
         if redis_client:
             stored_sys = redis_client.get("prompt:cosmos:system")
@@ -117,6 +163,8 @@ def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary")
                 }
             ],
             "temperature": 0.2,
+            "repetition_penalty": 1.15,
+            "presence_penalty": 0.1,
             "max_tokens": 512
         }
         
@@ -134,9 +182,11 @@ def process_sentinel_video(buffer_snapshot, fps=20, event_class="scene_summary")
                 "class": event_class,
                 "content": result_text,
                 "image_base64": thumb_base64,
+                "video_path": historical_file,
                 "timestamp": time.time()
             }
             redis_client.xadd("vision_events", event_data, maxlen=10000)
+            logger.info(f"Successfully published {event_class} to vision_events stream.")
             
     except Exception as e:
         logger.error(f"Failed to query Cosmos API: {e}")
@@ -150,20 +200,32 @@ except Exception as e:
 def redis_control_listener(loop):
     global RESTART_REQUESTED
     global MANUAL_SENTINEL_TRIGGER
+    global MANUAL_PROMPT_OVERRIDE
     if not redis_client:
         return
-    pubsub = redis_client.pubsub()
+    pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
     pubsub.subscribe("vision_control")
     logger.info("Listening for control messages on 'vision_control'...")
-    for message in pubsub.listen():
-        if message["type"] == "message":
-            try:
-                data = json.loads(message["data"])
-                if data.get("command") == "analyze_scene":
-                    MANUAL_SENTINEL_TRIGGER = True
-                    logger.info("Manual scene analysis requested via Redis.")
-            except Exception:
-                pass
+    
+    while True:
+        try:
+            message = pubsub.get_message(timeout=1.0)
+            if message and message["type"] == "message":
+                try:
+                    data = json.loads(message["data"])
+                    if data.get("command") == "analyze_scene":
+                        MANUAL_SENTINEL_TRIGGER = True
+                        MANUAL_PROMPT_OVERRIDE = {
+                            "previous_state": data.get("previous_state"),
+                            "user_query": data.get("user_query")
+                        }
+                        logger.info(f"Manual scene analysis requested via Redis: {MANUAL_PROMPT_OVERRIDE['user_query']}")
+                except Exception as e:
+                    logger.error(f"Error parsing Redis message: {e}")
+            time.sleep(0.1)
+        except Exception as e:
+            logger.error(f"Redis listener error: {e}")
+            time.sleep(5)
 
 def bus_call(bus, message, loop, pipeline):
     t = message.type
@@ -296,19 +358,26 @@ def osd_sink_pad_buffer_probe(pad, info, u_data):
 
         global MANUAL_SENTINEL_TRIGGER
         global LAST_SENTINEL_TRIGGER
+        global MANUAL_PROMPT_OVERRIDE
         if active_contact_detected or MANUAL_SENTINEL_TRIGGER:
             is_cooldown_ok = (current_time - LAST_SENTINEL_TRIGGER > SENTINEL_COOLDOWN)
             if is_cooldown_ok or MANUAL_SENTINEL_TRIGGER:
                 if len(FRAME_BUFFER) >= 10:
                     LAST_SENTINEL_TRIGGER = current_time
                     ev_class = "status_request" if MANUAL_SENTINEL_TRIGGER else "contact_report"
-                    t = threading.Thread(target=process_sentinel_video_delayed, args=(30, ev_class))
+                    
+                    # Pass overrides if manual trigger
+                    overrides = MANUAL_PROMPT_OVERRIDE if MANUAL_SENTINEL_TRIGGER else None
+                    
+                    delay_val = 0.0 if MANUAL_SENTINEL_TRIGGER else 2.5
+                    t = threading.Thread(target=process_sentinel_video_delayed, args=(30, ev_class, overrides, delay_val))
                     t.daemon = True
                     t.start()
                     
                     if MANUAL_SENTINEL_TRIGGER:
                         logger.info("Consumed manual sentinel trigger.")
                         MANUAL_SENTINEL_TRIGGER = False
+                        MANUAL_PROMPT_OVERRIDE = {}
 
     except Exception as e:
         logger.error(f"Error in deepstream loop: {e}")
@@ -332,7 +401,7 @@ def on_new_sample(sink, data):
             if size == h * w * 4:
                 frame_array = np.ndarray(shape=(h, w, 4), dtype=np.uint8, buffer=map_info.data)
                 frame_bgr = cv2.cvtColor(frame_array, cv2.COLOR_RGBA2BGR)
-                frame_small = cv2.resize(frame_bgr, (640, 360))
+                frame_small = cv2.resize(frame_bgr, (1280, 720))
                 FRAME_BUFFER.append(frame_small)
             elif size > h * w * 4:
                 pitch = size // h
@@ -340,7 +409,7 @@ def on_new_sample(sink, data):
                 frame_cropped = frame_array[:, :w*4]
                 frame_rgb = frame_cropped.reshape((h, w, 4))
                 frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGBA2BGR)
-                frame_small = cv2.resize(frame_bgr, (640, 360))
+                frame_small = cv2.resize(frame_bgr, (1280, 720))
                 FRAME_BUFFER.append(frame_small)
         except Exception as e:
             pass

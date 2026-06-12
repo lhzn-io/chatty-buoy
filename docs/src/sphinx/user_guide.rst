@@ -50,40 +50,37 @@ Run the ingestion script (from the host):
 This will index the documents into the ``postgres-vector`` database.
 
 3. Run the Agent (Hybrid Mode)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+------------------------------
 
-**Architecture Note:** 
-To maximize performance on Jetson Thor (ARM64) and avoid emulation overhead, we use a hybrid approach:
-*   **Infrastructure**: Docker containers for ASR (Riva), Brain (Triton), and Memory (Postgres).
-*   **TTS**: Local Native Execution for CosyVoice2 (Python/PyTorch) to leverage the GPU directly without x86 container definitions.
+The system features a containerized **audio-cli** service that handles the hardware audio interaction loop. This ensures unified management and logging via Docker.
 
-**Step 3.1: Start TTS Server (Local)**
+**Start the Agent Interface**
 
-Open a new terminal, activate the environment, and run the launcher:
+Open a terminal and run the stack controller:
 
 .. code-block:: bash
 
-   micromamba activate chatty-buoy
-   bash scripts/start_tts.sh
+   ./scripts/stack.sh start
 
-*This script will ensure dependencies (`cosyvoice`, `fastapi`, `uvicorn`) are installed and launch the API server on port 50000.*
+This will automatically launch the full cascade, including the audio loop.
 
-**Step 3.2: Start Agent Interface**
+**Monitoring the Audio Loop**
 
-In your main terminal:
+To view live audio processing logs and Quint's transcriptions:
 
 .. code-block:: bash
 
-   micromamba run -n chatty-buoy python3 src/orchestrator/main.py
+   docker compose logs -f audio-cli
 
-*   **Speak**: The system listens via ALSA (Default Device / Jabra).
-*   **Reflex**: Simple queries or conversational fillers are handled immediately.
+*   **Speak**: The system listens via the mapped Jabra Speak 710 hardware.
+*   **Interaction**: Reports and alerts will stream to the dashboard and text-cli simultaneously.
+
 4. Configure Watchstander Vision (Sentinel Mode)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The system includes a containerized Watchstander component powered by **Cosmos-Reason2-2B**. It maintains a rolling video buffer and automatically interprets complex scenes (Sentinel Mode) using DeepStream bounding boxes when whitelisted objects (like people or vessels) are detected, pushing insights to the agent's memory via Redis.
 
-**Dashboard**: Once `docker compose up -d` is running, the Sentinel Web Dashboard is available at `http://localhost:8080`.
+**Dashboard**: Once `docker compose up -d` is running, the Watchstander Web Dashboard is available at `http://localhost:8080`.
 Through the dashboard, you can monitor the live event feed, review Cosmos reasoning clips, and dynamically tune the VLM prompt configurations without restarting the service.
 
 You can configure the video source using the ``RTSP_URL`` variable in ``docker-compose.yaml`` under the ``vision-service`` (or ``cosmos-vision``) configurations:
@@ -114,3 +111,68 @@ You can configure the video source using the ``RTSP_URL`` variable in ``docker-c
 
        environment:
          - RTSP_URL=rtsp://mediamtx:8554/live
+
+Model Management and Offline Mode
+---------------------------------
+
+To ensure fast and reliable startups, especially in environments with limited or intermittent connectivity, the system is configured to run in **Offline Mode** by default and uses **Absolute Path Pinning** to ensure stability.
+
+**Core Concepts:**
+
+*   **HF_HUB_OFFLINE=1**: This environment variable prevents the system from reaching out to the Hugging Face API at startup. This eliminates network latency and prevents the service from hanging if the internet is slow or unavailable.
+*   **Absolute Path Pinning**: Instead of referencing a model by its repo ID (e.g., ``google/gemma-4-E4B-it``), we point the vLLM engine directly to the specific snapshot directory on the local disk. This acts as a strong version pin, preventing accidental regressions if a model provider updates the weights on the hub.
+
+**Current Configuration Example (from ``docker-compose.yaml``):**
+
+.. code-block:: yaml
+
+   front-end-service:
+     environment:
+       - HF_HUB_OFFLINE=1
+       - HF_HOME=/root/.cache/huggingface
+     entrypoint: [
+       "vllm", "serve", "/root/.cache/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/292a7e278a400932df35f9fd4b1501edd04133a5",
+       ...
+     ]
+
+   cosmos-vision:
+     environment:
+       - HF_HUB_OFFLINE=1
+       - HF_HOME=/data/models/huggingface
+     volumes:
+       - ~/.cache/huggingface:/data/models/huggingface
+     # Note: vLLM 0.14.0 requires Repo ID; cache is resolved via HF_HOME
+     entrypoint: [ "vllm", "serve", "nvidia/Cosmos-Reason2-2B", ... ]
+
+Administrative Procedures
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+These tasks should only be performed by an intentional operator when a network connection is available.
+
+**1. Check for Model Updates**
+To check if a newer version of a model is available:
+
+1.  Temporarily edit ``docker-compose.yaml`` to set ``HF_HUB_OFFLINE=0``.
+2.  Change the model path back to the Repo ID (e.g., ``google/gemma-4-E4B-it``).
+3.  Restart the service (``docker compose up -d <service>``).
+4.  If a new version is downloaded, vLLM will automatically create a new snapshot folder.
+
+**2. Force a Model Snapshot Update**
+If you want to move the entire stack to a newer version:
+
+1.  Follow the steps above to download the new snapshot.
+2.  Find the new snapshot hash by inspecting the local cache:
+    ``ls ~/.cache/huggingface/hub/models--google--gemma-4-E4B-it/snapshots/``
+3.  Update the ``entrypoint`` in ``docker-compose.yaml`` with the new absolute path.
+4.  Set ``HF_HUB_OFFLINE=1`` again.
+5.  Restart the stack.
+
+**3. Troubleshooting "Unhealthy" Models**
+The stack controller (``scripts/stack.sh``) includes self-healing logic. If a model service becomes unhealthy (due to memory issues or cache mismatch), run:
+
+.. code-block:: bash
+
+   ./scripts/stack.sh start
+
+The script will automatically detect the ``unhealthy`` status and force a clean restart of that specific service.
+

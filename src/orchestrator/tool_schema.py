@@ -59,7 +59,7 @@ CAMERA_TOOL = {
     "type": "function",
     "function": {
         "name": "check_camera_feed",
-        "description": "Check the camera feed to see what is currently around the boat. Use this when the user asks what you see, asks to check the camera, asks for a visual report, or asks if anything has changed visually in the last X minutes. It can diff against a point in time or summarize all events.",
+        "description": "Check the camera feed to see what is currently around the boat. Use this when the user asks what you see, asks to check the camera, asks for a visual report, or asks if anything has changed visually in the last X minutes. It can diff against a point in time or summarize all events. If the user asks a specific visual question (e.g. 'is there any wind?'), pass it in the specific_query field.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -71,6 +71,10 @@ CAMERA_TOOL = {
                     "type": "string",
                     "enum": ["current", "diff", "summary", "latest"],
                     "description": "Optional. Type of report. 'current' takes a new photo and checks right now. 'latest' pulls the most recent existing camera event without taking a new photo. 'diff' identifies and isolates the SINGLE closest historical report to the requested time (to save context space). 'summary' dumps a bulk list of ALL events over the duration (WARNING: uses heavy context, prefer 'diff' whenever possible)."
+                },
+                "specific_query": {
+                    "type": "string",
+                    "description": "Optional. A specific question the user has about the visual feed (e.g. 'is there any white caps on the water?', 'is that boat moving?'). This goes directly to the vision model."
                 }
             },
             "required": []
